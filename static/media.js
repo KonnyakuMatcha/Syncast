@@ -36,11 +36,11 @@
     return { type: description.type, sdp };
   }
 
-  function isTabAudioSafe(displaySurface) {
-    return displaySurface === "browser";
+  function isIsolatedAudioSafe(displaySurface) {
+    return displaySurface === "browser" || displaySurface === "window";
   }
 
-  const api = { SYSTEM_AUDIO_BITRATE, enhanceSystemAudio, isTabAudioSafe };
+  const api = { SYSTEM_AUDIO_BITRATE, enhanceSystemAudio, isIsolatedAudioSafe };
   global.SyncastMedia = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof globalThis !== "undefined" ? globalThis : window);
