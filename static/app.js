@@ -67,6 +67,11 @@ const QUALITY_PROFILES = {
 };
 
 let toastTimer;
+const appBasePath = window.location.pathname.replace(/\/+$/, "");
+
+function appPath(path) {
+  return `${appBasePath}${path}`;
+}
 
 function showToast(message) {
   elements.toast.textContent = message;
@@ -77,7 +82,7 @@ function showToast(message) {
 
 async function request(path, options = {}) {
   const authorization = state.sessionToken ? { Authorization: `Bearer ${state.sessionToken}` } : {};
-  const response = await fetch(path, {
+  const response = await fetch(appPath(path), {
     ...options,
     headers: { "Content-Type": "application/json", ...authorization, ...(options.headers || {}) },
   });
@@ -654,7 +659,7 @@ function closeRoom(message) {
 
 function leaveRoom() {
   if (!state.running) return;
-  fetch(`/api/rooms/${state.roomCode}?clientId=${encodeURIComponent(state.clientId)}`, {
+  fetch(appPath(`/api/rooms/${state.roomCode}?clientId=${encodeURIComponent(state.clientId)}`), {
     method: "DELETE",
     keepalive: true,
     headers: { Authorization: `Bearer ${state.sessionToken}` },
@@ -682,7 +687,7 @@ elements.sound.addEventListener("click", toggleSharedSound);
 elements.leave.addEventListener("click", leaveRoom);
 elements.fullscreen.addEventListener("click", () => elements.stageVideo.requestFullscreen?.());
 window.addEventListener("beforeunload", () => {
-  if (state.running) fetch(`/api/rooms/${state.roomCode}?clientId=${encodeURIComponent(state.clientId)}`, {
+  if (state.running) fetch(appPath(`/api/rooms/${state.roomCode}?clientId=${encodeURIComponent(state.clientId)}`), {
     method: "DELETE",
     keepalive: true,
     headers: { Authorization: `Bearer ${state.sessionToken}` },

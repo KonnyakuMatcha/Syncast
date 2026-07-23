@@ -48,6 +48,10 @@ TURN_SECRET=上一步生成的随机值
 docker compose --env-file .env -f compose.public.yaml up -d --build
 ```
 
+公网入口位于 `https://<SYNCAST_DOMAIN>/Syncast/`，健康检查位于
+`https://<SYNCAST_DOMAIN>/Syncast/api/health`。路径区分大小写，末尾的 `/` 不可省略；
+访问 `/Syncast` 时 Caddy 会自动跳转到规范地址。
+
 需要在云防火墙和系统防火墙开放：
 
 | 端口 | 协议 | 用途 |

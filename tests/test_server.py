@@ -60,6 +60,9 @@ class LiveServerTests(unittest.TestCase):
         connection.close()
         self.assertEqual(response.status, 200)
         self.assertIn("点对点直播与语音协作", body)
+        self.assertIn('href="styles.css"', body)
+        self.assertIn('src="app.js"', body)
+        self.assertNotIn('href="/styles.css"', body)
 
     def test_room_join_and_directed_signal(self) -> None:
         status, host = self.request("POST", "/api/rooms", {"name": "Host"})
