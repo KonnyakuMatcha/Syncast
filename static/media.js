@@ -36,7 +36,11 @@
     return { type: description.type, sdp };
   }
 
-  const api = { SYSTEM_AUDIO_BITRATE, enhanceSystemAudio };
+  function isTabAudioSafe(displaySurface) {
+    return displaySurface === "browser";
+  }
+
+  const api = { SYSTEM_AUDIO_BITRATE, enhanceSystemAudio, isTabAudioSafe };
   global.SyncastMedia = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof globalThis !== "undefined" ? globalThis : window);

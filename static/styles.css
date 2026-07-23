@@ -173,6 +173,7 @@ input::placeholder { color: #59625c; }
 .quality-control select option { color: var(--ink); background: var(--panel); }
 .control-button { min-width: 76px; height: 52px; padding: 6px 10px; display: grid; place-items: center; align-content: center; gap: 4px; border: 1px solid #303732; border-radius: 4px; color: #b9c2bb; background: #1a1f1b; cursor: pointer; }
 .control-button:hover { border-color: #556159; background: #202621; }
+.control-button:disabled { opacity: .45; cursor: not-allowed; }
 .control-button.share { color: #15231a; border-color: var(--green); background: var(--green); }
 .control-button.active { color: #d8f5e2; border-color: #477255; background: #1b3122; }
 .control-button.off { color: #9ca39e; border-color: #493333; background: #281b1b; }

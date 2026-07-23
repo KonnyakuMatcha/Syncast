@@ -46,6 +46,7 @@ const state = {
   microphone: null,
   microphoneMuted: false,
   display: null,
+  displaySurface: "",
   sharedSoundEnabled: true,
   participants: new Map(),
   memberStates: new Map(),
@@ -228,14 +229,20 @@ function setNetworkState(online) {
 }
 
 function updateMediaControls() {
+  const hostHasSilentShare = state.isHost && state.display && !state.display.getAudioTracks().length;
   elements.mic.classList.toggle("off", state.microphoneMuted || !state.microphone);
   elements.mic.querySelector(".control-label").textContent = state.microphoneMuted || !state.microphone ? "麦克风关闭" : "麦克风";
   elements.sound.classList.toggle("off", !state.sharedSoundEnabled);
-  elements.sound.querySelector(".control-label").textContent = state.sharedSoundEnabled ? "共享声音" : "声音关闭";
+  elements.sound.disabled = Boolean(hostHasSilentShare);
+  elements.sound.querySelector(".control-label").textContent = hostHasSilentShare
+    ? "仅共享画面"
+    : (state.sharedSoundEnabled ? "共享声音" : "声音关闭");
   elements.share.classList.toggle("active", Boolean(state.display));
   elements.share.querySelector(".control-label").textContent = state.display ? "停止共享" : "共享屏幕";
   elements.mediaNote.textContent = state.isHost && state.display
-    ? (state.display.getAudioTracks().length ? "系统声音正在共享" : "当前画面没有共享声音")
+    ? (state.display.getAudioTracks().length
+      ? "标签页音频 · 回音安全"
+      : (state.displaySurface === "browser" ? "标签页 · 未共享声音" : "窗口或全屏 · 仅共享画面"))
     : "麦克风仅用于通话";
 }
 
@@ -510,10 +517,24 @@ async function startSharing() {
         noiseSuppression: false,
         autoGainControl: false,
       },
+      selfBrowserSurface: "exclude",
+      surfaceSwitching: "include",
+      systemAudio: "exclude",
     });
     state.display = display;
+    const displayTrack = display.getVideoTracks()[0];
+    state.displaySurface = displayTrack.getSettings().displaySurface || "unknown";
     state.sharedSoundEnabled = true;
-    display.getVideoTracks()[0].contentHint = "detail";
+    displayTrack.contentHint = "detail";
+    const captureHandle = displayTrack.getCaptureHandle?.();
+    const capturedSyncast = captureHandle?.handle === "syncast-voice-room";
+    const tabAudioSafe = SyncastMedia.isTabAudioSafe(state.displaySurface) && !capturedSyncast;
+    if (!tabAudioSafe) {
+      for (const track of display.getAudioTracks()) {
+        track.stop();
+        display.removeTrack(track);
+      }
+    }
     for (const track of display.getAudioTracks()) {
       track.contentHint = "music";
       track.applyConstraints({
@@ -529,7 +550,13 @@ async function startSharing() {
     display.getVideoTracks()[0].addEventListener("ended", stopSharing, { once: true });
     showStage(true);
     updateMediaControls();
-    if (!display.getAudioTracks().length) showToast("浏览器未提供系统声音，请在共享窗口中勾选声音");
+    if (capturedSyncast) {
+      showToast("不能共享 Syncast 自身声音，请选择其他标签页");
+    } else if (!tabAudioSafe) {
+      showToast("为避免通话回音，窗口和全屏模式仅共享画面");
+    } else if (!display.getAudioTracks().length) {
+      showToast("当前标签页没有共享声音，请在选择器中勾选标签页音频");
+    }
     await Promise.all([...state.participants.keys()].filter((id) => id !== state.clientId).map(offerStage));
   } catch (error) {
     if (error.name !== "NotAllowedError") showToast("无法开始屏幕共享");
@@ -540,6 +567,7 @@ function stopSharing() {
   if (!state.display) return;
   const display = state.display;
   state.display = null;
+  state.displaySurface = "";
   display.getTracks().forEach((track) => track.stop());
   for (const participant of state.participants.values()) {
     if (participant.id !== state.clientId) sendSignal(participant.id, { channel: "stage-stop" });
@@ -664,3 +692,13 @@ const savedQuality = localStorage.getItem("syncast-quality");
 if (Object.hasOwn(QUALITY_PROFILES, savedQuality)) state.preferredQuality = savedQuality;
 elements.name.value = localStorage.getItem("lan-live-name") || "";
 elements.name.addEventListener("change", () => localStorage.setItem("lan-live-name", elements.name.value.trim()));
+
+try {
+  navigator.mediaDevices.setCaptureHandleConfig?.({
+    exposeOrigin: false,
+    handle: "syncast-voice-room",
+    permittedOrigins: ["*"],
+  });
+} catch (error) {
+  console.warn("Unable to register capture handle", error);
+}
