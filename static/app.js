@@ -91,6 +91,7 @@ async function acquireMicrophone() {
     video: false,
     audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
   });
+  state.microphone.getAudioTracks().forEach((track) => { track.contentHint = "speech"; });
   return state.microphone;
 }
 
@@ -364,20 +365,40 @@ function createStagePeer(peerId) {
   return peer;
 }
 
+async function configureStageAudioSender(peer) {
+  const sender = peer?.pc.getSenders().find((item) => item.track?.kind === "audio");
+  if (!sender) return;
+  sender.track.contentHint = "music";
+  const parameters = sender.getParameters();
+  const encoding = parameters.encodings?.[0];
+  if (!encoding) return;
+  encoding.maxBitrate = SyncastMedia.SYSTEM_AUDIO_BITRATE;
+  try {
+    await sender.setParameters(parameters);
+  } catch (error) {
+    console.warn("Unable to apply system audio bitrate", error);
+  }
+}
+
 async function offerStage(peerId) {
   if (!state.display) return;
   const peer = createStagePeer(peerId);
-  const offer = await peer.pc.createOffer();
+  const offer = SyncastMedia.enhanceSystemAudio(await peer.pc.createOffer());
   await peer.pc.setLocalDescription(offer);
   await sendSignal(peerId, { channel: "stage", description: peer.pc.localDescription });
 }
 
 async function applyDescription(channel, peerId, description) {
   const peer = channel === "voice" ? createVoicePeer(peerId) : (state.stagePeers.get(peerId) || createStagePeer(peerId));
-  await peer.pc.setRemoteDescription(description);
+  const remoteDescription = channel === "stage" ? SyncastMedia.enhanceSystemAudio(description) : description;
+  await peer.pc.setRemoteDescription(remoteDescription);
+  if (channel === "stage" && description.type === "answer" && state.isHost) {
+    await configureStageAudioSender(peer);
+  }
   for (const candidate of peer.candidates.splice(0)) await peer.pc.addIceCandidate(candidate);
   if (description.type === "offer") {
-    const answer = await peer.pc.createAnswer();
+    const createdAnswer = await peer.pc.createAnswer();
+    const answer = channel === "stage" ? SyncastMedia.enhanceSystemAudio(createdAnswer) : createdAnswer;
     await peer.pc.setLocalDescription(answer);
     await sendSignal(peerId, { channel, description: peer.pc.localDescription });
     if (channel === "stage" && !state.isHost) requestStageQuality();
@@ -482,11 +503,27 @@ async function startSharing() {
   try {
     const display = await navigator.mediaDevices.getDisplayMedia({
       video: { frameRate: { ideal: 30, max: 60 } },
-      audio: true,
+      audio: {
+        channelCount: { ideal: 2 },
+        sampleRate: { ideal: 48_000 },
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+      },
     });
     state.display = display;
     state.sharedSoundEnabled = true;
     display.getVideoTracks()[0].contentHint = "detail";
+    for (const track of display.getAudioTracks()) {
+      track.contentHint = "music";
+      track.applyConstraints({
+        channelCount: { ideal: 2 },
+        sampleRate: { ideal: 48_000 },
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+      }).catch((error) => console.warn("Unable to apply system audio constraints", error));
+    }
     elements.stageVideo.srcObject = display;
     elements.stageVideo.muted = true;
     display.getVideoTracks()[0].addEventListener("ended", stopSharing, { once: true });

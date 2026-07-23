@@ -23,6 +23,8 @@ Syncast 是一个自托管的小型直播协作服务。公网服务器负责房
 
 实际分辨率和帧率仍受共享源、浏览器、房主上行及观看端网络限制。只有存在“高帧”观众时，房主才会将屏幕采集提升到 60 FPS。
 
+系统音频和麦克风采用不同的编码策略：系统音频使用 48 kHz 立体声 Opus、音乐内容提示和最高 192 kbps 发送码率，并关闭语音降噪、自动增益与 DTX；麦克风继续使用回声消除、降噪和自动增益。浏览器或操作系统只提供单声道源时不会被强制扩展为真实立体声。
+
 ## 公网部署
 
 准备一台有公网 IPv4 的 Linux 服务器、一个指向该服务器的域名，以及 Docker Compose。复制环境变量模板并填写真实值：
@@ -90,6 +92,7 @@ python3 server.py
 
 ```bash
 python3 -m unittest discover -s tests -v
+node tests/media.test.js
 node --check static/app.js
 docker compose --env-file .env -f compose.public.yaml config --quiet
 ```
