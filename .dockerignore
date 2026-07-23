@@ -1,0 +1,6 @@
+.cert
+.env
+.git
+__pycache__
+tests
+*.pyc

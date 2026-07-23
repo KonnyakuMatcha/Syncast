@@ -35,6 +35,7 @@ const elements = {
 const state = {
   roomCode: "",
   clientId: "",
+  sessionToken: "",
   hostId: "",
   isHost: false,
   name: "",
@@ -48,6 +49,8 @@ const state = {
   memberStates: new Map(),
   voicePeers: new Map(),
   stagePeers: new Map(),
+  iceServers: [],
+  iceRefreshSeconds: 0,
 };
 
 let toastTimer;
@@ -60,9 +63,10 @@ function showToast(message) {
 }
 
 async function request(path, options = {}) {
+  const authorization = state.sessionToken ? { Authorization: `Bearer ${state.sessionToken}` } : {};
   const response = await fetch(path, {
     ...options,
-    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+    headers: { "Content-Type": "application/json", ...authorization, ...(options.headers || {}) },
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(data.error || "请求失败");
@@ -124,10 +128,13 @@ async function enterRoom(mode) {
 function startSession(session, name) {
   state.roomCode = session.roomCode;
   state.clientId = session.clientId;
+  state.sessionToken = session.sessionToken;
   state.hostId = session.hostId;
   state.isHost = session.isHost;
   state.name = name;
   state.sequence = session.sequence;
+  state.iceServers = Array.isArray(session.iceServers) ? session.iceServers : [];
+  state.iceRefreshSeconds = Number(session.iceRefreshSeconds) || 0;
   state.running = true;
   state.participants.clear();
   session.participants.forEach((participant) => state.participants.set(participant.id, participant));
@@ -146,7 +153,29 @@ function startSession(session, name) {
   updateMediaControls();
   setNetworkState(true);
   pollEvents();
+  scheduleIceRefresh();
   broadcastMemberState();
+}
+
+function scheduleIceRefresh(delaySeconds = state.iceRefreshSeconds) {
+  if (!state.running || !state.iceRefreshSeconds) return;
+  setTimeout(async () => {
+    if (!state.running) return;
+    let nextDelay = state.iceRefreshSeconds;
+    try {
+      const config = await request(`/api/rooms/${state.roomCode}/ice?clientId=${encodeURIComponent(state.clientId)}`);
+      state.iceServers = Array.isArray(config.iceServers) ? config.iceServers : state.iceServers;
+      state.iceRefreshSeconds = Number(config.iceRefreshSeconds) || state.iceRefreshSeconds;
+      for (const peer of [...state.voicePeers.values(), ...state.stagePeers.values()]) {
+        peer.pc.setConfiguration({ iceServers: state.iceServers });
+      }
+    } catch (error) {
+      console.warn("Unable to refresh ICE configuration", error);
+      nextDelay = Math.min(60, state.iceRefreshSeconds);
+    } finally {
+      scheduleIceRefresh(nextDelay);
+    }
+  }, delaySeconds * 1000);
 }
 
 function renderParticipants() {
@@ -208,7 +237,7 @@ async function sendSignal(peerId, data) {
 }
 
 function buildPeer(channel, peerId) {
-  const pc = new RTCPeerConnection({ iceServers: [] });
+  const pc = new RTCPeerConnection({ iceServers: state.iceServers });
   const peer = { pc, candidates: [] };
   pc.onicecandidate = ({ candidate }) => {
     if (candidate) sendSignal(peerId, { channel, candidate });
@@ -492,6 +521,7 @@ function leaveRoom() {
   fetch(`/api/rooms/${state.roomCode}?clientId=${encodeURIComponent(state.clientId)}`, {
     method: "DELETE",
     keepalive: true,
+    headers: { Authorization: `Bearer ${state.sessionToken}` },
   }).catch(() => {});
   closeRoom(state.isHost ? "房间已结束" : "已离开房间");
 }
@@ -509,7 +539,11 @@ elements.sound.addEventListener("click", toggleSharedSound);
 elements.leave.addEventListener("click", leaveRoom);
 elements.fullscreen.addEventListener("click", () => elements.stageVideo.requestFullscreen?.());
 window.addEventListener("beforeunload", () => {
-  if (state.running) fetch(`/api/rooms/${state.roomCode}?clientId=${encodeURIComponent(state.clientId)}`, { method: "DELETE", keepalive: true });
+  if (state.running) fetch(`/api/rooms/${state.roomCode}?clientId=${encodeURIComponent(state.clientId)}`, {
+    method: "DELETE",
+    keepalive: true,
+    headers: { Authorization: `Bearer ${state.sessionToken}` },
+  });
 });
 
 const initialCode = new URLSearchParams(location.search).get("room");

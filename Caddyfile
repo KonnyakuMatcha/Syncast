@@ -1,0 +1,10 @@
+{$SYNCAST_DOMAIN:localhost} {
+    encode zstd gzip
+    reverse_proxy syncast:8080
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        Referrer-Policy "same-origin"
+        Permissions-Policy "camera=(), display-capture=(self), microphone=(self)"
+    }
+}
