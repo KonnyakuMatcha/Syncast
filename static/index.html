@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#101311">
+  <title>同屏 · 局域直播协作</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main id="lobby" class="lobby-shell">
+    <section class="lobby-panel" aria-labelledby="lobby-title">
+      <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+      <p class="eyebrow">LAN COLLABORATION</p>
+      <h1 id="lobby-title">同屏</h1>
+      <p class="lobby-copy">局域直播与语音协作</p>
+
+      <form id="lobby-form" class="lobby-form">
+        <label for="display-name">昵称</label>
+        <input id="display-name" name="name" maxlength="24" autocomplete="nickname" placeholder="你的名字" required>
+        <div class="lobby-actions">
+          <button id="create-room" class="button primary" type="button">
+            <span class="button-icon" aria-hidden="true">＋</span>创建房间
+          </button>
+          <div class="join-row">
+            <input id="room-code" name="roomCode" maxlength="6" autocomplete="off" spellcheck="false" placeholder="房间码" aria-label="房间码">
+            <button id="join-room" class="button secondary" type="submit">加入</button>
+          </div>
+        </div>
+      </form>
+      <p id="lobby-error" class="form-error" role="alert"></p>
+      <div class="privacy-note"><span class="privacy-dot"></span>媒体仅在房间成员间传输</div>
+    </section>
+  </main>
+
+  <main id="room" class="room-shell" hidden>
+    <header class="topbar">
+      <div class="brand-compact">
+        <div class="brand-mark small" aria-hidden="true"><span></span><span></span><span></span></div>
+        <strong>同屏</strong>
+      </div>
+      <div class="room-identity">
+        <span class="room-label">房间</span>
+        <button id="copy-code" class="room-code" type="button" title="复制房间码">
+          <span id="room-code-label"></span><span class="copy-icon" aria-hidden="true">□</span>
+        </button>
+      </div>
+      <div id="network-state" class="network-state"><span></span>正在连接</div>
+    </header>
+
+    <div class="workspace">
+      <section class="stage" aria-label="共享画面">
+        <video id="stage-video" autoplay playsinline></video>
+        <div id="stage-empty" class="stage-empty">
+          <div class="screen-glyph" aria-hidden="true"><span></span></div>
+          <p id="stage-status">等待房主开始共享</p>
+          <small id="stage-substatus">语音频道已就绪</small>
+        </div>
+        <div id="live-badge" class="live-badge" hidden><span></span>直播中</div>
+        <button id="fullscreen" class="icon-button stage-fullscreen" type="button" title="全屏" hidden aria-label="全屏">⌗</button>
+      </section>
+
+      <aside class="sidebar">
+        <div class="sidebar-heading">
+          <div>
+            <p class="eyebrow">VOICE CHANNEL</p>
+            <h2>通话频道</h2>
+          </div>
+          <span id="member-count" class="member-count">1</span>
+        </div>
+        <div id="participant-list" class="participant-list"></div>
+        <div class="channel-status">
+          <span class="channel-pulse"></span>
+          <div><strong id="voice-status">语音已连接</strong><small>局域网点对点</small></div>
+        </div>
+      </aside>
+    </div>
+
+    <footer class="controlbar">
+      <div class="session-info">
+        <span id="role-label">参与者</span>
+        <strong id="self-name"></strong>
+      </div>
+      <div class="controls">
+        <button id="share-button" class="control-button share" type="button" hidden>
+          <span class="control-icon" aria-hidden="true">▣</span><span class="control-label">共享屏幕</span>
+        </button>
+        <button id="mic-button" class="control-button" type="button">
+          <span class="control-icon mic-icon" aria-hidden="true"></span><span class="control-label">麦克风</span>
+        </button>
+        <button id="sound-button" class="control-button" type="button">
+          <span class="control-icon sound-icon" aria-hidden="true"></span><span class="control-label">共享声音</span>
+        </button>
+        <button id="leave-button" class="control-button danger" type="button">
+          <span class="control-icon" aria-hidden="true">↗</span><span class="control-label">离开</span>
+        </button>
+      </div>
+      <div class="media-note"><span></span><span id="media-note-text">麦克风仅用于通话</span></div>
+    </footer>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <div id="remote-audio" hidden></div>
+  <script src="/app.js"></script>
+</body>
+</html>
