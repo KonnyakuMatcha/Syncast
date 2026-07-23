@@ -24,7 +24,7 @@ body {
   letter-spacing: 0;
 }
 
-button, input { font: inherit; letter-spacing: 0; }
+button, input, select { font: inherit; letter-spacing: 0; }
 
 button { color: inherit; }
 
@@ -167,6 +167,10 @@ input::placeholder { color: #59625c; }
 .session-info span { color: var(--green); font: 600 9px/1 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: 1px; text-transform: uppercase; }
 .session-info strong { font-size: 12px; }
 .controls { display: flex; gap: 8px; }
+.quality-control { width: 128px; height: 52px; display: grid; align-content: center; gap: 4px; padding: 5px 9px; border: 1px solid #303732; border-radius: 4px; background: #1a1f1b; }
+.quality-control > span { color: #778179; font-size: 9px; }
+.quality-control select { width: 100%; border: 0; padding: 0; color: #c7d0c9; background: transparent; outline: none; cursor: pointer; font-size: 10px; }
+.quality-control select option { color: var(--ink); background: var(--panel); }
 .control-button { min-width: 76px; height: 52px; padding: 6px 10px; display: grid; place-items: center; align-content: center; gap: 4px; border: 1px solid #303732; border-radius: 4px; color: #b9c2bb; background: #1a1f1b; cursor: pointer; }
 .control-button:hover { border-color: #556159; background: #202621; }
 .control-button.share { color: #15231a; border-color: var(--green); background: var(--green); }
@@ -201,6 +205,7 @@ input::placeholder { color: #59625c; }
   .session-info, .media-note { display: none; }
   .controls { justify-content: center; gap: 5px; }
   .control-button { min-width: 66px; height: 50px; padding: 4px 6px; }
+  .quality-control { width: 104px; height: 50px; padding: 4px 7px; }
   .topbar .brand-compact strong { display: none; }
 }
 

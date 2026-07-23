@@ -24,6 +24,8 @@ const elements = {
   role: document.querySelector("#role-label"),
   selfName: document.querySelector("#self-name"),
   share: document.querySelector("#share-button"),
+  qualityControl: document.querySelector("#quality-control"),
+  qualitySelect: document.querySelector("#quality-select"),
   mic: document.querySelector("#mic-button"),
   sound: document.querySelector("#sound-button"),
   leave: document.querySelector("#leave-button"),
@@ -49,8 +51,18 @@ const state = {
   memberStates: new Map(),
   voicePeers: new Map(),
   stagePeers: new Map(),
+  stageQualities: new Map(),
+  preferredQuality: "auto",
   iceServers: [],
   iceRefreshSeconds: 0,
+};
+
+const QUALITY_PROFILES = {
+  auto: { height: null, frameRate: null, maxBitrate: null },
+  smooth: { height: 720, frameRate: 30, maxBitrate: 2_500_000 },
+  clear: { height: 1080, frameRate: 30, maxBitrate: 5_000_000 },
+  high: { height: 1080, frameRate: 60, maxBitrate: 10_000_000 },
+  ultra: { height: 1440, frameRate: 30, maxBitrate: 12_000_000 },
 };
 
 let toastTimer;
@@ -146,6 +158,8 @@ function startSession(session, name) {
   elements.selfName.textContent = name;
   elements.role.textContent = state.isHost ? "房主" : "参与者";
   elements.share.hidden = !state.isHost;
+  elements.qualityControl.hidden = state.isHost;
+  elements.qualitySelect.value = state.preferredQuality;
   elements.stageStatus.textContent = state.isHost ? "开始共享你的屏幕" : "等待房主开始共享";
   elements.stageSubstatus.textContent = state.isHost ? "系统声音可随画面共享" : "语音频道已就绪";
   history.replaceState(null, "", `?room=${state.roomCode}`);
@@ -283,6 +297,51 @@ async function offerVoice(peerId) {
   await sendSignal(peerId, { channel: "member-state", muted: state.microphoneMuted });
 }
 
+function requestStageQuality() {
+  if (!state.isHost && state.hostId) {
+    sendSignal(state.hostId, { channel: "stage-quality", quality: state.preferredQuality });
+  }
+}
+
+async function updateDisplayFrameRate() {
+  const track = state.display?.getVideoTracks()[0];
+  if (!track) return;
+  const needsHighFrameRate = [...state.stageQualities.values()].some((quality) => quality === "high");
+  const frameRate = needsHighFrameRate ? 60 : 30;
+  track.contentHint = needsHighFrameRate ? "motion" : "detail";
+  try {
+    await track.applyConstraints({ frameRate: { ideal: frameRate, max: frameRate } });
+  } catch (error) {
+    console.warn(`Unable to capture at ${frameRate} FPS`, error);
+  }
+}
+
+async function applyStageQuality(peerId, requestedQuality) {
+  const quality = Object.hasOwn(QUALITY_PROFILES, requestedQuality) ? requestedQuality : "auto";
+  const profile = QUALITY_PROFILES[quality];
+  state.stageQualities.set(peerId, quality);
+  await updateDisplayFrameRate();
+
+  const peer = state.stagePeers.get(peerId);
+  const sender = peer?.pc.getSenders().find((item) => item.track?.kind === "video");
+  if (!sender) return;
+  const parameters = sender.getParameters();
+  const encoding = parameters.encodings?.[0];
+  if (!encoding) return;
+  const sourceHeight = sender.track.getSettings().height || profile.height || 1080;
+  encoding.scaleResolutionDownBy = profile.height ? Math.max(1, sourceHeight / profile.height) : 1;
+  if (profile.maxBitrate) encoding.maxBitrate = profile.maxBitrate;
+  else delete encoding.maxBitrate;
+  if (profile.frameRate) encoding.maxFramerate = profile.frameRate;
+  else delete encoding.maxFramerate;
+  parameters.degradationPreference = quality === "high" ? "maintain-framerate" : "maintain-resolution";
+  try {
+    await sender.setParameters(parameters);
+  } catch (error) {
+    console.warn(`Unable to apply ${quality} quality for peer`, error);
+  }
+}
+
 function createStagePeer(peerId) {
   const old = state.stagePeers.get(peerId);
   if (old) old.pc.close();
@@ -321,6 +380,7 @@ async function applyDescription(channel, peerId, description) {
     const answer = await peer.pc.createAnswer();
     await peer.pc.setLocalDescription(answer);
     await sendSignal(peerId, { channel, description: peer.pc.localDescription });
+    if (channel === "stage" && !state.isHost) requestStageQuality();
   }
 }
 
@@ -345,6 +405,10 @@ async function handleSignal(payload) {
     if (!state.isHost) showStage(false);
     return;
   }
+  if (data.channel === "stage-quality") {
+    if (state.isHost) await applyStageQuality(peerId, data.quality);
+    return;
+  }
   if (!['voice', 'stage'].includes(data.channel)) return;
   try {
     if (data.description) await applyDescription(data.channel, peerId, data.description);
@@ -367,8 +431,10 @@ async function handleEvent(event) {
   if (event.type === "participant-left") {
     state.participants.delete(payload.id);
     state.memberStates.delete(payload.id);
+    state.stageQualities.delete(payload.id);
     closePeer(state.voicePeers, payload.id);
     closeStagePeer(payload.id);
+    if (state.isHost) updateDisplayFrameRate();
     removeRemoteAudio(payload.id);
     renderParticipants();
     return;
@@ -420,6 +486,7 @@ async function startSharing() {
     });
     state.display = display;
     state.sharedSoundEnabled = true;
+    display.getVideoTracks()[0].contentHint = "detail";
     elements.stageVideo.srcObject = display;
     elements.stageVideo.muted = true;
     display.getVideoTracks()[0].addEventListener("ended", stopSharing, { once: true });
@@ -441,6 +508,7 @@ function stopSharing() {
     if (participant.id !== state.clientId) sendSignal(participant.id, { channel: "stage-stop" });
   }
   for (const peerId of [...state.stagePeers.keys()]) closeStagePeer(peerId);
+  state.stageQualities.clear();
   elements.stageVideo.srcObject = null;
   showStage(false);
   updateMediaControls();
@@ -534,6 +602,13 @@ elements.copy.addEventListener("click", async () => {
   showToast("房间码已复制");
 });
 elements.share.addEventListener("click", () => state.display ? stopSharing() : startSharing());
+elements.qualitySelect.addEventListener("change", () => {
+  const quality = elements.qualitySelect.value;
+  state.preferredQuality = Object.hasOwn(QUALITY_PROFILES, quality) ? quality : "auto";
+  localStorage.setItem("syncast-quality", state.preferredQuality);
+  requestStageQuality();
+  showToast(`观看画质已设为${elements.qualitySelect.selectedOptions[0].textContent}`);
+});
 elements.mic.addEventListener("click", toggleMicrophone);
 elements.sound.addEventListener("click", toggleSharedSound);
 elements.leave.addEventListener("click", leaveRoom);
@@ -548,5 +623,7 @@ window.addEventListener("beforeunload", () => {
 
 const initialCode = new URLSearchParams(location.search).get("room");
 if (initialCode) elements.code.value = initialCode.toUpperCase().slice(0, 6);
+const savedQuality = localStorage.getItem("syncast-quality");
+if (Object.hasOwn(QUALITY_PROFILES, savedQuality)) state.preferredQuality = savedQuality;
 elements.name.value = localStorage.getItem("lan-live-name") || "";
 elements.name.addEventListener("change", () => localStorage.setItem("lan-live-name", elements.name.value.trim()));
