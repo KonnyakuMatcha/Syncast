@@ -247,9 +247,9 @@ function updateMediaControls() {
   elements.share.querySelector(".control-label").textContent = state.display ? "停止共享" : "共享屏幕";
   elements.mediaNote.textContent = state.isHost && state.display
     ? (state.display.getAudioTracks().length
-      ? (state.displaySurface === "monitor"
+      ? (["monitor", "window"].includes(state.displaySurface)
         ? "系统音频 · 可能产生回音"
-        : (state.displaySurface === "window" ? "窗口音频 · 独立采集" : "标签页音频 · 回音安全"))
+        : "标签页音频 · 回音安全")
       : (state.displaySurface === "monitor" ? "整个屏幕 · 仅共享画面" : "当前来源 · 未共享声音"))
     : "麦克风仅用于通话";
 }
@@ -528,7 +528,7 @@ async function startSharing() {
       selfBrowserSurface: "exclude",
       surfaceSwitching: "include",
       systemAudio: "include",
-      windowAudio: "window",
+      windowAudio: "system",
     });
     state.display = display;
     const displayTrack = display.getVideoTracks()[0];
@@ -560,12 +560,12 @@ async function startSharing() {
     updateMediaControls();
     if (capturedSyncast) {
       showToast("不能共享 Syncast 自身声音，请选择其他标签页");
-    } else if (state.displaySurface === "monitor" && display.getAudioTracks().length) {
-      showToast("整个屏幕会包含通话声音，可能产生回音");
+    } else if (["monitor", "window"].includes(state.displaySurface) && display.getAudioTracks().length) {
+      showToast("系统音频会包含通话声音，可能产生回音");
     } else if (state.displaySurface === "monitor") {
       showToast("当前系统或浏览器没有提供整屏音频，正在仅共享画面");
     } else if (state.displaySurface === "window" && !display.getAudioTracks().length) {
-      showToast("当前浏览器或窗口不支持独立音频，正在仅共享画面");
+      showToast("当前系统或浏览器没有提供窗口系统音频，正在仅共享画面");
     } else if (!display.getAudioTracks().length) {
       showToast("当前标签页没有共享声音，请在选择器中勾选标签页音频");
     }
