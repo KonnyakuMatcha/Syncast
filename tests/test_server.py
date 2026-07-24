@@ -63,6 +63,8 @@ class LiveServerTests(unittest.TestCase):
         self.assertIn('href="styles.css"', body)
         self.assertIn('src="app.js"', body)
         self.assertNotIn('href="/styles.css"', body)
+        self.assertIn('<option value="high" selected>高帧 · 1080p60</option>', body)
+        self.assertNotIn('<option value="auto">', body)
 
     def test_room_join_and_directed_signal(self) -> None:
         status, host = self.request("POST", "/api/rooms", {"name": "Host"})

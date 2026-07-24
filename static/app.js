@@ -34,6 +34,8 @@ const elements = {
   toast: document.querySelector("#toast"),
 };
 
+const DEFAULT_QUALITY = "high";
+
 const state = {
   roomCode: "",
   clientId: "",
@@ -53,17 +55,16 @@ const state = {
   voicePeers: new Map(),
   stagePeers: new Map(),
   stageQualities: new Map(),
-  preferredQuality: "auto",
+  preferredQuality: DEFAULT_QUALITY,
   iceServers: [],
   iceRefreshSeconds: 0,
 };
 
 const QUALITY_PROFILES = {
-  auto: { height: null, frameRate: null, maxBitrate: null },
-  smooth: { height: 720, frameRate: 30, maxBitrate: 2_500_000 },
-  clear: { height: 1080, frameRate: 30, maxBitrate: 5_000_000 },
-  high: { height: 1080, frameRate: 60, maxBitrate: 10_000_000 },
-  ultra: { height: 1440, frameRate: 30, maxBitrate: 12_000_000 },
+  smooth: { height: 720, frameRate: 30, maxBitrate: 5_000_000 },
+  clear: { height: 1080, frameRate: 30, maxBitrate: 10_000_000 },
+  high: { height: 1080, frameRate: 60, maxBitrate: 20_000_000 },
+  ultra: { height: 1440, frameRate: 30, maxBitrate: 24_000_000 },
 };
 
 let toastTimer;
@@ -330,7 +331,7 @@ async function updateDisplayFrameRate() {
 }
 
 async function applyStageQuality(peerId, requestedQuality) {
-  const quality = Object.hasOwn(QUALITY_PROFILES, requestedQuality) ? requestedQuality : "auto";
+  const quality = Object.hasOwn(QUALITY_PROFILES, requestedQuality) ? requestedQuality : DEFAULT_QUALITY;
   const profile = QUALITY_PROFILES[quality];
   state.stageQualities.set(peerId, quality);
   await updateDisplayFrameRate();
@@ -514,7 +515,7 @@ function broadcastMemberState() {
 async function startSharing() {
   try {
     const display = await navigator.mediaDevices.getDisplayMedia({
-      video: { frameRate: { ideal: 30, max: 60 } },
+      video: { frameRate: { ideal: 60, max: 60 } },
       audio: {
         channelCount: { ideal: 2 },
         sampleRate: { ideal: 48_000 },
@@ -531,7 +532,7 @@ async function startSharing() {
     const displayTrack = display.getVideoTracks()[0];
     state.displaySurface = displayTrack.getSettings().displaySurface || "unknown";
     state.sharedSoundEnabled = true;
-    displayTrack.contentHint = "detail";
+    displayTrack.contentHint = "motion";
     const captureHandle = displayTrack.getCaptureHandle?.();
     const capturedSyncast = captureHandle?.handle === "syncast-voice-room";
     const isolatedAudioSafe = SyncastMedia.isIsolatedAudioSafe(state.displaySurface) && !capturedSyncast;
@@ -677,7 +678,7 @@ elements.copy.addEventListener("click", async () => {
 elements.share.addEventListener("click", () => state.display ? stopSharing() : startSharing());
 elements.qualitySelect.addEventListener("change", () => {
   const quality = elements.qualitySelect.value;
-  state.preferredQuality = Object.hasOwn(QUALITY_PROFILES, quality) ? quality : "auto";
+  state.preferredQuality = Object.hasOwn(QUALITY_PROFILES, quality) ? quality : DEFAULT_QUALITY;
   localStorage.setItem("syncast-quality", state.preferredQuality);
   requestStageQuality();
   showToast(`观看画质已设为${elements.qualitySelect.selectedOptions[0].textContent}`);
