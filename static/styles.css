@@ -171,6 +171,13 @@ input::placeholder { color: #59625c; }
 .quality-control > span { color: #778179; font-size: 9px; }
 .quality-control select { width: 100%; border: 0; padding: 0; color: #c7d0c9; background: transparent; outline: none; cursor: pointer; font-size: 10px; }
 .quality-control select option { color: var(--ink); background: var(--panel); }
+.topology-control { width: 88px; height: 52px; display: grid; grid-template-columns: 30px 1fr; place-content: center; align-items: center; gap: 7px; padding: 5px 8px; border: 1px solid #303732; border-radius: 4px; color: #9ca69f; background: #1a1f1b; cursor: pointer; font-size: 9px; }
+.topology-control input { position: absolute; opacity: 0; pointer-events: none; }
+.toggle-track { width: 30px; height: 16px; position: relative; border: 1px solid #465048; border-radius: 8px; background: #242a25; }
+.toggle-track span { width: 10px; height: 10px; position: absolute; top: 2px; left: 2px; border-radius: 50%; background: #879189; transition: transform .15s ease, background .15s ease; }
+.topology-control input:checked + .toggle-track { border-color: #477255; background: #1b3122; }
+.topology-control input:checked + .toggle-track span { transform: translateX(14px); background: var(--green); }
+.topology-control:focus-within { border-color: #556159; }
 .control-button { min-width: 76px; height: 52px; padding: 6px 10px; display: grid; place-items: center; align-content: center; gap: 4px; border: 1px solid #303732; border-radius: 4px; color: #b9c2bb; background: #1a1f1b; cursor: pointer; }
 .control-button:hover { border-color: #556159; background: #202621; }
 .control-button:disabled { opacity: .45; cursor: not-allowed; }
@@ -207,6 +214,7 @@ input::placeholder { color: #59625c; }
   .controls { justify-content: center; gap: 5px; }
   .control-button { min-width: 66px; height: 50px; padding: 4px 6px; }
   .quality-control { width: 104px; height: 50px; padding: 4px 7px; }
+  .topology-control { width: 76px; height: 50px; padding: 4px 6px; }
   .topbar .brand-compact strong { display: none; }
 }
 

@@ -7,7 +7,7 @@ Syncast 是一个自托管的小型直播协作服务。公网服务器只负责
 1. 所有成员通过 HTTPS 连接公网信令服务并加入房间。
 2. 浏览器交换 SDP 与 ICE 候选，依次尝试局域网直连和 STUN 公网打洞。
 3. 客户端拒绝 TURN `relay` 候选；无法完成 P2P 打洞的成员对会连接失败。
-4. 屏幕采用房主到观众的星型 P2P，语音采用成员间 mesh。
+4. 屏幕默认采用房主到观众的星型 P2P；房主可开启“带宽分担”，由符合条件的桌面端成员中转画面和系统音频。语音始终采用成员间 mesh。
 
 屏幕、标签页声音和浏览器支持的窗口专属音频来自 `getDisplayMedia`，麦克风来自独立的 `getUserMedia`，因此房主麦克风不会混入直播音轨。应用请求 `windowAudio: "window"` 并禁止整机音频：标签页和独立窗口音轨可以发送，整个屏幕模式只发送画面。选择器会尽量排除当前 Syncast 标签页。不要选择包含 Syncast 通话页面的浏览器窗口；游戏或独立播放器窗口是窗口音频的目标场景。单房间最多 12 人，公网日常使用建议不超过 8 人；更大房间应改用 SFU。
 
@@ -58,6 +58,8 @@ docker compose --env-file .env -f compose.public.yaml up -d --build
 
 Caddy 自动申请 HTTPS 证书。STUN 使用外部公共服务，只发现参与者的公网候选地址，不转发媒体。服务端不会下发 TURN 地址，客户端也会丢弃 `relay` 候选，因此 NAT 穿透失败时不会占用服务器媒体带宽，但对应成员将无法建立媒体连接。
 
+“带宽分担”默认关闭。开启后，客户端依据已有语音 P2P 链路的连通性、往返延迟、设备类型和页面可见性选择中转节点；拓扑最多两层，每个中转节点最多服务 2 个下游。中转离开或链路失败时，房主会重新发布拓扑。该模式只分担房主上行，不会让服务端转发媒体，但会增加中转成员的上行、CPU 占用和一跳延迟。
+
 ## 局域网启动
 
 不需要第三方 Python 依赖：
@@ -90,6 +92,7 @@ python3 server.py
 ```bash
 python3 -m unittest discover -s tests -v
 node tests/media.test.js
+node tests/topology.test.js
 node --check static/app.js
 docker compose --env-file .env -f compose.public.yaml config --quiet
 ```

@@ -82,6 +82,11 @@
         <strong id="self-name"></strong>
       </div>
       <div class="controls">
+        <label id="topology-control" class="topology-control" hidden>
+          <input id="topology-toggle" type="checkbox">
+          <span class="toggle-track" aria-hidden="true"><span></span></span>
+          <span>带宽分担</span>
+        </label>
         <label id="quality-control" class="quality-control" hidden>
           <span>观看画质</span>
           <select id="quality-select" aria-label="观看画质">
@@ -111,6 +116,7 @@
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <div id="remote-audio" hidden></div>
   <script src="media.js"></script>
+  <script src="topology.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
