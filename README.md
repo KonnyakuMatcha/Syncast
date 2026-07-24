@@ -1,12 +1,12 @@
 # Syncast
 
-Syncast 是一个自托管的小型直播协作服务。公网服务器负责房间信令和 ICE 协商，屏幕、系统声音及独立麦克风轨道通过 WebRTC 在成员间直接传输；NAT 穿透失败时才回退到 TURN 中继。
+Syncast 是一个自托管的小型直播协作服务。公网服务器只负责网页、房间信令和 ICE 协商，屏幕、系统声音及独立麦克风轨道通过 WebRTC 在成员间直接传输，不提供服务器媒体中继。
 
 ## 工作方式
 
 1. 所有成员通过 HTTPS 连接公网信令服务并加入房间。
 2. 浏览器交换 SDP 与 ICE 候选，依次尝试局域网直连和 STUN 公网打洞。
-3. 无法直连的成员对使用 TURN；媒体仍由 WebRTC 加密。
+3. 客户端拒绝 TURN `relay` 候选；无法完成 P2P 打洞的成员对会连接失败。
 4. 屏幕采用房主到观众的星型 P2P，语音采用成员间 mesh。
 
 屏幕、标签页声音和浏览器支持的窗口专属音频来自 `getDisplayMedia`，麦克风来自独立的 `getUserMedia`，因此房主麦克风不会混入直播音轨。应用请求 `windowAudio: "window"` 并禁止整机音频：标签页和独立窗口音轨可以发送，整个屏幕模式只发送画面。选择器会尽量排除当前 Syncast 标签页。不要选择包含 Syncast 通话页面的浏览器窗口；游戏或独立播放器窗口是窗口音频的目标场景。单房间最多 12 人，公网日常使用建议不超过 8 人；更大房间应改用 SFU。
@@ -30,15 +30,13 @@ Syncast 是一个自托管的小型直播协作服务。公网服务器负责房
 
 ```bash
 cp .env.example .env
-openssl rand -hex 32
 ```
 
 `.env` 示例：
 
 ```dotenv
 SYNCAST_DOMAIN=syncast.example.com
-PUBLIC_IP=203.0.113.10
-TURN_SECRET=上一步生成的随机值
+RTC_STUN_URLS=stun:stun.cloudflare.com:3478,stun:stun.l.google.com:19302
 ```
 
 启动服务：
@@ -57,10 +55,8 @@ docker compose --env-file .env -f compose.public.yaml up -d --build
 |---|---|---|
 | 80 | TCP | Caddy 申请证书及 HTTPS 跳转 |
 | 443 | TCP、UDP | HTTPS 和 HTTP/3 信令 |
-| 3478 | TCP、UDP | STUN/TURN |
-| 49160–49200 | UDP | TURN 媒体中继 |
 
-Caddy 自动申请 HTTPS 证书。Syncast 使用和 coturn 相同的 `TURN_SECRET` 生成一小时有效的 HMAC 临时凭据，长期密钥不会下发给浏览器。
+Caddy 自动申请 HTTPS 证书。STUN 使用外部公共服务，只发现参与者的公网候选地址，不转发媒体。服务端不会下发 TURN 地址，客户端也会丢弃 `relay` 候选，因此 NAT 穿透失败时不会占用服务器媒体带宽，但对应成员将无法建立媒体连接。
 
 ## 局域网启动
 
@@ -70,7 +66,7 @@ Caddy 自动申请 HTTPS 证书。Syncast 使用和 coturn 相同的 `TURN_SECRE
 python3 server.py
 ```
 
-默认地址为 `https://localhost:8443`。其他设备可访问 `https://<主机局域网 IP>:8443`，首次打开需要接受本地自签名证书。未配置 `RTC_STUN_URLS` 和 `RTC_TURN_URLS` 时，浏览器只使用本地 ICE 候选。
+默认地址为 `https://localhost:8443`。其他设备可访问 `https://<主机局域网 IP>:8443`，首次打开需要接受本地自签名证书。未配置 `RTC_STUN_URLS` 时，浏览器只使用本地 ICE 候选。
 
 仅限本机调试时可以关闭 TLS：
 
@@ -84,12 +80,10 @@ python3 server.py --host 127.0.0.1 --port 8080 --http
 
 ```bash
 export RTC_STUN_URLS='stun:rtc.example.com:3478'
-export RTC_TURN_URLS='turn:rtc.example.com:3478?transport=udp,turn:rtc.example.com:3478?transport=tcp'
-export RTC_TURN_SECRET='与 coturn static-auth-secret 相同的随机值'
 python3 server.py
 ```
 
-也支持 `RTC_TURN_USERNAME` 和 `RTC_TURN_PASSWORD` 静态认证，但公网部署推荐使用临时凭据。
+即使环境中存在旧的 `RTC_TURN_URLS` 或 TURN 凭据，服务端也会忽略它们。
 
 ## 测试
 

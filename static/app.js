@@ -268,7 +268,7 @@ function buildPeer(channel, peerId) {
   const pc = new RTCPeerConnection({ iceServers: state.iceServers });
   const peer = { pc, candidates: [] };
   pc.onicecandidate = ({ candidate }) => {
-    if (candidate) sendSignal(peerId, { channel, candidate });
+    if (candidate && !SyncastMedia.isRelayCandidate(candidate)) sendSignal(peerId, { channel, candidate });
   };
   pc.onconnectionstatechange = () => {
     const connected = [...state.voicePeers.values()].some((item) => item.pc.connectionState === "connected");
@@ -403,7 +403,8 @@ async function offerStage(peerId) {
 
 async function applyDescription(channel, peerId, description) {
   const peer = channel === "voice" ? createVoicePeer(peerId) : (state.stagePeers.get(peerId) || createStagePeer(peerId));
-  const remoteDescription = channel === "stage" ? SyncastMedia.enhanceSystemAudio(description) : description;
+  const p2pDescription = SyncastMedia.stripRelayCandidates(description);
+  const remoteDescription = channel === "stage" ? SyncastMedia.enhanceSystemAudio(p2pDescription) : p2pDescription;
   await peer.pc.setRemoteDescription(remoteDescription);
   if (channel === "stage" && description.type === "answer" && state.isHost) {
     await configureStageAudioSender(peer);
@@ -419,6 +420,7 @@ async function applyDescription(channel, peerId, description) {
 }
 
 async function applyCandidate(channel, peerId, candidate) {
+  if (SyncastMedia.isRelayCandidate(candidate)) return;
   const collection = channel === "voice" ? state.voicePeers : state.stagePeers;
   let peer = collection.get(peerId);
   if (!peer) peer = channel === "voice" ? createVoicePeer(peerId) : createStagePeer(peerId);

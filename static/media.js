@@ -40,7 +40,26 @@
     return displaySurface === "browser" || displaySurface === "window";
   }
 
-  const api = { SYSTEM_AUDIO_BITRATE, enhanceSystemAudio, isIsolatedAudioSafe };
+  function isRelayCandidate(candidate) {
+    return /\btyp relay\b/i.test(candidate?.candidate || "");
+  }
+
+  function stripRelayCandidates(description) {
+    if (!description?.sdp) return description;
+    const sdp = description.sdp
+      .split("\r\n")
+      .filter((line) => !(line.startsWith("a=candidate:") && /\btyp relay\b/i.test(line)))
+      .join("\r\n");
+    return { type: description.type, sdp };
+  }
+
+  const api = {
+    SYSTEM_AUDIO_BITRATE,
+    enhanceSystemAudio,
+    isIsolatedAudioSafe,
+    isRelayCandidate,
+    stripRelayCandidates,
+  };
   global.SyncastMedia = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof globalThis !== "undefined" ? globalThis : window);

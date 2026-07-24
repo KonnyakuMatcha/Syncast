@@ -1,7 +1,13 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { SYSTEM_AUDIO_BITRATE, enhanceSystemAudio, isIsolatedAudioSafe } = require("../static/media.js");
+const {
+  SYSTEM_AUDIO_BITRATE,
+  enhanceSystemAudio,
+  isIsolatedAudioSafe,
+  isRelayCandidate,
+  stripRelayCandidates,
+} = require("../static/media.js");
 
 const offer = {
   type: "offer",
@@ -33,5 +39,22 @@ assert.equal(isIsolatedAudioSafe("browser"), true);
 assert.equal(isIsolatedAudioSafe("window"), true);
 assert.equal(isIsolatedAudioSafe("monitor"), false);
 assert.equal(isIsolatedAudioSafe(undefined), false);
+
+assert.equal(isRelayCandidate({ candidate: "candidate:1 1 udp 1 192.0.2.1 5000 typ host" }), false);
+assert.equal(isRelayCandidate({ candidate: "candidate:2 1 udp 1 198.51.100.1 6000 typ srflx" }), false);
+assert.equal(isRelayCandidate({ candidate: "candidate:3 1 udp 1 203.0.113.1 3478 typ relay" }), true);
+
+const p2pOnly = stripRelayCandidates({
+  type: "offer",
+  sdp: [
+    "v=0",
+    "a=candidate:1 1 udp 1 192.0.2.1 5000 typ host",
+    "a=candidate:2 1 udp 1 203.0.113.1 3478 typ relay",
+    "a=end-of-candidates",
+    "",
+  ].join("\r\n"),
+});
+assert.match(p2pOnly.sdp, /typ host/);
+assert.doesNotMatch(p2pOnly.sdp, /typ relay/);
 
 console.log("system audio SDP tests passed");

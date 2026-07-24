@@ -118,38 +118,33 @@ class LiveServerTests(unittest.TestCase):
         )
         self.assertEqual(status, 401)
 
-    def test_ice_configuration_uses_expiring_turn_credentials(self) -> None:
+    def test_ice_configuration_is_stun_only(self) -> None:
         environment = {
             "RTC_STUN_URLS": "stun:rtc.example.com:3478",
             "RTC_TURN_URLS": "turn:rtc.example.com:3478?transport=udp,turn:rtc.example.com:3478?transport=tcp",
             "RTC_TURN_SECRET": "test-secret",
-            "RTC_TURN_TTL": "3600",
         }
         with patch.dict(server.os.environ, environment, clear=True):
-            ice_servers = server.build_ice_servers("client-123")
-        self.assertEqual(ice_servers[0]["urls"], ["stun:rtc.example.com:3478"])
-        self.assertEqual(len(ice_servers[1]["urls"]), 2)
-        self.assertTrue(ice_servers[1]["username"].endswith(":client-123"))
-        self.assertNotEqual(ice_servers[1]["credential"], environment["RTC_TURN_SECRET"])
+            ice_servers = server.build_ice_servers()
+        self.assertEqual(ice_servers, [{"urls": ["stun:rtc.example.com:3478"]}])
 
-    def test_authenticated_ice_refresh(self) -> None:
+    def test_authenticated_ice_config_stays_stun_only(self) -> None:
         environment = {
             "RTC_STUN_URLS": "stun:rtc.example.com:3478",
             "RTC_TURN_URLS": "turn:rtc.example.com:3478",
             "RTC_TURN_SECRET": "test-secret",
-            "RTC_TURN_TTL": "3600",
         }
         with patch.dict(server.os.environ, environment, clear=True):
             _, host = self.request("POST", "/api/rooms", {"name": "Host"})
-            self.assertEqual(host["iceRefreshSeconds"], 2400)
+            self.assertEqual(host["iceRefreshSeconds"], 0)
             status, refreshed = self.request(
                 "GET",
                 f"/api/rooms/{host['roomCode']}/ice?clientId={host['clientId']}",
                 token=host["sessionToken"],
             )
         self.assertEqual(status, 200)
-        self.assertEqual(refreshed["iceRefreshSeconds"], 2400)
-        self.assertEqual(len(refreshed["iceServers"]), 2)
+        self.assertEqual(refreshed["iceRefreshSeconds"], 0)
+        self.assertEqual(refreshed["iceServers"], [{"urls": ["stun:rtc.example.com:3478"]}])
 
 
 if __name__ == "__main__":

@@ -4,9 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
-import hashlib
-import hmac
 import ipaddress
 import json
 import mimetypes
@@ -32,47 +29,14 @@ PARTICIPANT_TTL_SECONDS = 45
 ROOM_TTL_SECONDS = 6 * 60 * 60
 MAX_PARTICIPANTS = 12
 ROOM_ALPHABET = string.ascii_uppercase.replace("I", "").replace("O", "") + "23456789"
-DEFAULT_TURN_TTL_SECONDS = 60 * 60
-
-
 def _urls_from_env(name: str) -> list[str]:
     return [value.strip() for value in os.environ.get(name, "").split(",") if value.strip()]
 
 
-def turn_ttl_seconds() -> int:
-    try:
-        return max(300, min(86_400, int(os.environ.get("RTC_TURN_TTL", DEFAULT_TURN_TTL_SECONDS))))
-    except ValueError:
-        return DEFAULT_TURN_TTL_SECONDS
-
-
-def build_ice_servers(client_id: str) -> list[dict]:
-    """Build browser ICE configuration, including coturn REST credentials."""
-    servers: list[dict] = []
+def build_ice_servers() -> list[dict]:
+    """Build a STUN-only ICE configuration so media can never use TURN."""
     stun_urls = _urls_from_env("RTC_STUN_URLS")
-    turn_urls = _urls_from_env("RTC_TURN_URLS")
-    if stun_urls:
-        servers.append({"urls": stun_urls})
-    if not turn_urls:
-        return servers
-
-    turn_server: dict = {"urls": turn_urls}
-    turn_secret = os.environ.get("RTC_TURN_SECRET", "")
-    if turn_secret:
-        ttl = turn_ttl_seconds()
-        username = f"{int(time.time()) + ttl}:{client_id}"
-        digest = hmac.new(turn_secret.encode(), username.encode(), hashlib.sha1).digest()
-        turn_server.update({
-            "username": username,
-            "credential": base64.b64encode(digest).decode(),
-        })
-    elif os.environ.get("RTC_TURN_USERNAME") and os.environ.get("RTC_TURN_PASSWORD"):
-        turn_server.update({
-            "username": os.environ["RTC_TURN_USERNAME"],
-            "credential": os.environ["RTC_TURN_PASSWORD"],
-        })
-    servers.append(turn_server)
-    return servers
+    return [{"urls": stun_urls}] if stun_urls else []
 
 
 @dataclass
@@ -239,12 +203,8 @@ class LiveHandler(BaseHTTPRequestHandler):
             "hostId": room.host_id,
             "isHost": participant.client_id == room.host_id,
             "sequence": room.next_sequence - 1,
-            "iceServers": build_ice_servers(participant.client_id),
-            "iceRefreshSeconds": (
-                max(60, turn_ttl_seconds() * 2 // 3)
-                if os.environ.get("RTC_TURN_SECRET") and _urls_from_env("RTC_TURN_URLS")
-                else 0
-            ),
+            "iceServers": build_ice_servers(),
+            "iceRefreshSeconds": 0,
             "participants": [item.public(room.host_id) for item in room.participants.values()],
         }
 
@@ -260,7 +220,7 @@ class LiveHandler(BaseHTTPRequestHandler):
                 "ok": True,
                 "ice": {
                     "stun": bool(_urls_from_env("RTC_STUN_URLS")),
-                    "turn": bool(_urls_from_env("RTC_TURN_URLS")),
+                    "turn": False,
                 },
             })
             return
@@ -366,8 +326,8 @@ class LiveHandler(BaseHTTPRequestHandler):
             self.send_json({"error": str(error)}, HTTPStatus.UNAUTHORIZED)
             return
         self.send_json({
-            "iceServers": build_ice_servers(client_id),
-            "iceRefreshSeconds": max(60, turn_ttl_seconds() * 2 // 3),
+            "iceServers": build_ice_servers(),
+            "iceRefreshSeconds": 0,
         })
 
     def serve_static(self, request_path: str) -> None:
