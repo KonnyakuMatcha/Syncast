@@ -24,6 +24,8 @@ const elements = {
   role: document.querySelector("#role-label"),
   selfName: document.querySelector("#self-name"),
   share: document.querySelector("#share-button"),
+  windowAudioControl: document.querySelector("#window-audio-control"),
+  windowAudioSelect: document.querySelector("#window-audio-select"),
   qualityControl: document.querySelector("#quality-control"),
   qualitySelect: document.querySelector("#quality-select"),
   mic: document.querySelector("#mic-button"),
@@ -35,6 +37,7 @@ const elements = {
 };
 
 const DEFAULT_QUALITY = "high";
+const DEFAULT_WINDOW_AUDIO_MODE = "isolated";
 
 const state = {
   roomCode: "",
@@ -50,6 +53,7 @@ const state = {
   display: null,
   displaySurface: "",
   sharedSoundEnabled: true,
+  windowAudioMode: DEFAULT_WINDOW_AUDIO_MODE,
   participants: new Map(),
   memberStates: new Map(),
   voicePeers: new Map(),
@@ -166,6 +170,8 @@ function startSession(session, name) {
   elements.selfName.textContent = name;
   elements.role.textContent = state.isHost ? "房主" : "参与者";
   elements.share.hidden = !state.isHost;
+  elements.windowAudioControl.hidden = !state.isHost;
+  elements.windowAudioSelect.value = state.windowAudioMode;
   elements.qualityControl.hidden = state.isHost;
   elements.qualitySelect.value = state.preferredQuality;
   elements.stageStatus.textContent = state.isHost ? "开始共享你的屏幕" : "等待房主开始共享";
@@ -245,11 +251,12 @@ function updateMediaControls() {
     : (state.sharedSoundEnabled ? "共享声音" : "声音关闭");
   elements.share.classList.toggle("active", Boolean(state.display));
   elements.share.querySelector(".control-label").textContent = state.display ? "停止共享" : "共享屏幕";
+  elements.windowAudioSelect.disabled = Boolean(state.display);
   elements.mediaNote.textContent = state.isHost && state.display
     ? (state.display.getAudioTracks().length
-      ? (["monitor", "window"].includes(state.displaySurface)
-        ? "系统音频 · 可能产生回音"
-        : "标签页音频 · 回音安全")
+      ? (SyncastMedia.isIsolatedAudioSafe(state.displaySurface, state.windowAudioMode)
+        ? (state.displaySurface === "window" ? "窗口独立音频" : "标签页音频 · 回音安全")
+        : "系统音频 · 可能产生回音")
       : (state.displaySurface === "monitor" ? "整个屏幕 · 仅共享画面" : "当前来源 · 未共享声音"))
     : "麦克风仅用于通话";
 }
@@ -528,7 +535,7 @@ async function startSharing() {
       selfBrowserSurface: "exclude",
       surfaceSwitching: "include",
       systemAudio: "include",
-      windowAudio: "system",
+      windowAudio: SyncastMedia.getWindowAudioPreference(state.windowAudioMode),
     });
     state.display = display;
     const displayTrack = display.getVideoTracks()[0];
@@ -560,12 +567,15 @@ async function startSharing() {
     updateMediaControls();
     if (capturedSyncast) {
       showToast("不能共享 Syncast 自身声音，请选择其他标签页");
-    } else if (["monitor", "window"].includes(state.displaySurface) && display.getAudioTracks().length) {
+    } else if (!SyncastMedia.isIsolatedAudioSafe(state.displaySurface, state.windowAudioMode)
+        && display.getAudioTracks().length) {
       showToast("系统音频会包含通话声音，可能产生回音");
+    } else if (state.displaySurface === "window" && display.getAudioTracks().length) {
+      showToast("已共享窗口独立音频");
     } else if (state.displaySurface === "monitor") {
       showToast("当前系统或浏览器没有提供整屏音频，正在仅共享画面");
     } else if (state.displaySurface === "window" && !display.getAudioTracks().length) {
-      showToast("当前系统或浏览器没有提供窗口系统音频，正在仅共享画面");
+      showToast("当前系统或浏览器没有提供窗口音频，正在仅共享画面");
     } else if (!display.getAudioTracks().length) {
       showToast("当前标签页没有共享声音，请在选择器中勾选标签页音频");
     }
@@ -679,6 +689,11 @@ elements.copy.addEventListener("click", async () => {
   showToast("房间码已复制");
 });
 elements.share.addEventListener("click", () => state.display ? stopSharing() : startSharing());
+elements.windowAudioSelect.addEventListener("change", () => {
+  state.windowAudioMode = elements.windowAudioSelect.value === "system" ? "system" : "isolated";
+  localStorage.setItem("syncast-window-audio", state.windowAudioMode);
+  showToast(state.windowAudioMode === "system" ? "窗口将使用系统混音" : "窗口将使用独立音频");
+});
 elements.qualitySelect.addEventListener("change", () => {
   const quality = elements.qualitySelect.value;
   state.preferredQuality = Object.hasOwn(QUALITY_PROFILES, quality) ? quality : DEFAULT_QUALITY;
@@ -702,6 +717,8 @@ const initialCode = new URLSearchParams(location.search).get("room");
 if (initialCode) elements.code.value = initialCode.toUpperCase().slice(0, 6);
 const savedQuality = localStorage.getItem("syncast-quality");
 if (Object.hasOwn(QUALITY_PROFILES, savedQuality)) state.preferredQuality = savedQuality;
+const savedWindowAudioMode = localStorage.getItem("syncast-window-audio");
+if (["isolated", "system"].includes(savedWindowAudioMode)) state.windowAudioMode = savedWindowAudioMode;
 elements.name.value = localStorage.getItem("lan-live-name") || "";
 elements.name.addEventListener("change", () => localStorage.setItem("lan-live-name", elements.name.value.trim()));
 

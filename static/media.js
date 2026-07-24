@@ -36,11 +36,21 @@
     return { type: description.type, sdp };
   }
 
-  function isIsolatedAudioSafe(displaySurface) {
-    return displaySurface === "browser" || displaySurface === "window";
+  function getWindowAudioPreference(mode) {
+    return mode === "system" ? "system" : "window";
   }
 
-  const api = { SYSTEM_AUDIO_BITRATE, enhanceSystemAudio, isIsolatedAudioSafe };
+  function isIsolatedAudioSafe(displaySurface, windowAudioMode = "isolated") {
+    return displaySurface === "browser"
+      || (displaySurface === "window" && windowAudioMode === "isolated");
+  }
+
+  const api = {
+    SYSTEM_AUDIO_BITRATE,
+    enhanceSystemAudio,
+    getWindowAudioPreference,
+    isIsolatedAudioSafe,
+  };
   global.SyncastMedia = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof globalThis !== "undefined" ? globalThis : window);

@@ -1,7 +1,12 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { SYSTEM_AUDIO_BITRATE, enhanceSystemAudio, isIsolatedAudioSafe } = require("../static/media.js");
+const {
+  SYSTEM_AUDIO_BITRATE,
+  enhanceSystemAudio,
+  getWindowAudioPreference,
+  isIsolatedAudioSafe,
+} = require("../static/media.js");
 
 const offer = {
   type: "offer",
@@ -30,8 +35,12 @@ const withoutFmtp = enhanceSystemAudio({
 assert.match(withoutFmtp.sdp, /a=rtpmap:109 opus\/48000\/2\r\na=fmtp:109 /);
 
 assert.equal(isIsolatedAudioSafe("browser"), true);
-assert.equal(isIsolatedAudioSafe("window"), true);
+assert.equal(isIsolatedAudioSafe("window", "isolated"), true);
+assert.equal(isIsolatedAudioSafe("window", "system"), false);
 assert.equal(isIsolatedAudioSafe("monitor"), false);
 assert.equal(isIsolatedAudioSafe(undefined), false);
+assert.equal(getWindowAudioPreference("isolated"), "window");
+assert.equal(getWindowAudioPreference("system"), "system");
+assert.equal(getWindowAudioPreference("unexpected"), "window");
 
 console.log("system audio SDP tests passed");
