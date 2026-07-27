@@ -66,7 +66,14 @@
             <p class="eyebrow">VOICE CHANNEL</p>
             <h2>通话频道</h2>
           </div>
-          <span id="member-count" class="member-count">1</span>
+          <div class="sidebar-actions">
+            <label id="topology-control" class="topology-control" hidden title="动态树状转发">
+              <input id="topology-toggle" type="checkbox">
+              <span class="topology-switch" aria-hidden="true"><span></span></span>
+              <span>树状</span>
+            </label>
+            <span id="member-count" class="member-count">1</span>
+          </div>
         </div>
         <div id="participant-list" class="participant-list"></div>
         <div class="channel-status">
@@ -117,6 +124,7 @@
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <div id="remote-audio" hidden></div>
+  <script src="topology.js"></script>
   <script src="media.js"></script>
   <script src="app.js"></script>
 </body>

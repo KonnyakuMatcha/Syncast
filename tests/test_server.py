@@ -64,6 +64,8 @@ class LiveServerTests(unittest.TestCase):
         self.assertIn('src="app.js"', body)
         self.assertNotIn('href="/styles.css"', body)
         self.assertIn('<option value="high" selected>高帧 · 1080p60</option>', body)
+        self.assertIn('id="topology-toggle"', body)
+        self.assertIn('src="topology.js"', body)
         self.assertNotIn('<option value="auto">', body)
 
     def test_room_join_and_directed_signal(self) -> None:
@@ -72,9 +74,15 @@ class LiveServerTests(unittest.TestCase):
         self.assertTrue(host["isHost"])
         code = host["roomCode"]
 
-        status, guest = self.request("POST", f"/api/rooms/{code}/join", {"name": "Guest"})
+        status, guest = self.request(
+            "POST",
+            f"/api/rooms/{code}/join",
+            {"name": "Guest", "relayCapable": False},
+        )
         self.assertEqual(status, 200)
         self.assertEqual(len(guest["participants"]), 2)
+        guest_public = next(item for item in guest["participants"] if item["id"] == guest["clientId"])
+        self.assertFalse(guest_public["relayCapable"])
 
         status, _ = self.request(
             "POST",

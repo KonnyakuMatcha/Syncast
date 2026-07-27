@@ -79,6 +79,7 @@ def build_ice_servers(client_id: str) -> list[dict]:
 class Participant:
     client_id: str
     name: str
+    relay_capable: bool = True
     session_token: str = field(default_factory=lambda: secrets.token_urlsafe(32))
     joined_at: float = field(default_factory=time.time)
     last_seen: float = field(default_factory=time.time)
@@ -88,6 +89,7 @@ class Participant:
             "id": self.client_id,
             "name": self.name,
             "isHost": self.client_id == host_id,
+            "relayCapable": self.relay_capable,
         }
 
 
@@ -125,18 +127,18 @@ class RoomStore:
     def _new_client_id() -> str:
         return secrets.token_urlsafe(24)
 
-    def create(self, name: str) -> tuple[Room, Participant]:
+    def create(self, name: str, relay_capable: bool = True) -> tuple[Room, Participant]:
         with self.lock:
             while True:
                 code = "".join(secrets.choice(ROOM_ALPHABET) for _ in range(6))
                 if code not in self.rooms:
                     break
-            participant = Participant(self._new_client_id(), name)
+            participant = Participant(self._new_client_id(), name, relay_capable)
             room = Room(code, participant.client_id, {participant.client_id: participant})
             self.rooms[code] = room
             return room, participant
 
-    def join(self, code: str, name: str) -> tuple[Room, Participant]:
+    def join(self, code: str, name: str, relay_capable: bool = True) -> tuple[Room, Participant]:
         with self.lock:
             self.cleanup()
             room = self.rooms.get(code.upper())
@@ -144,7 +146,7 @@ class RoomStore:
                 raise LookupError("房间不存在或已经结束")
             if len(room.participants) >= MAX_PARTICIPANTS:
                 raise ValueError("房间人数已满")
-            participant = Participant(self._new_client_id(), name)
+            participant = Participant(self._new_client_id(), name, relay_capable)
             room.participants[participant.client_id] = participant
             room.publish("participant-joined", participant.public(room.host_id))
             return room, participant
@@ -231,6 +233,10 @@ class LiveHandler(BaseHTTPRequestHandler):
             raise ValueError("请输入昵称")
         return name[:24]
 
+    @staticmethod
+    def relay_capable(value: object) -> bool:
+        return value is not False
+
     def room_response(self, room: Room, participant: Participant) -> dict:
         return {
             "roomCode": room.code,
@@ -277,12 +283,19 @@ class LiveHandler(BaseHTTPRequestHandler):
         try:
             payload = self.read_json()
             if parsed.path == "/api/rooms":
-                room, participant = STORE.create(self.clean_name(payload.get("name")))
+                room, participant = STORE.create(
+                    self.clean_name(payload.get("name")),
+                    self.relay_capable(payload.get("relayCapable")),
+                )
                 self.send_json(self.room_response(room, participant), HTTPStatus.CREATED)
                 return
             parts = parsed.path.strip("/").split("/")
             if len(parts) == 4 and parts[:2] == ["api", "rooms"] and parts[3] == "join":
-                room, participant = STORE.join(parts[2], self.clean_name(payload.get("name")))
+                room, participant = STORE.join(
+                    parts[2],
+                    self.clean_name(payload.get("name")),
+                    self.relay_capable(payload.get("relayCapable")),
+                )
                 self.send_json(self.room_response(room, participant))
                 return
             if len(parts) == 4 and parts[:2] == ["api", "rooms"] and parts[3] == "signal":

@@ -20,6 +20,8 @@ const elements = {
   fullscreen: document.querySelector("#fullscreen"),
   participantList: document.querySelector("#participant-list"),
   memberCount: document.querySelector("#member-count"),
+  topologyControl: document.querySelector("#topology-control"),
+  topologyToggle: document.querySelector("#topology-toggle"),
   voiceStatus: document.querySelector("#voice-status"),
   role: document.querySelector("#role-label"),
   selfName: document.querySelector("#self-name"),
@@ -38,6 +40,7 @@ const elements = {
 
 const DEFAULT_QUALITY = "high";
 const DEFAULT_WINDOW_AUDIO_MODE = "isolated";
+const DEFAULT_TOPOLOGY_ENABLED = false;
 
 const state = {
   roomCode: "",
@@ -59,6 +62,12 @@ const state = {
   voicePeers: new Map(),
   stagePeers: new Map(),
   stageQualities: new Map(),
+  stageStream: null,
+  stageParentId: "",
+  stageChildIds: new Set(),
+  topologyEnabled: DEFAULT_TOPOLOGY_ENABLED,
+  topologyVersion: 0,
+  blockedStageEdges: new Map(),
   preferredQuality: DEFAULT_QUALITY,
   iceServers: [],
   iceRefreshSeconds: 0,
@@ -111,6 +120,11 @@ function setLobbyBusy(busy) {
   elements.join.disabled = busy;
 }
 
+function canRelayStage() {
+  return !(navigator.userAgentData?.mobile
+    || /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent));
+}
+
 async function enterRoom(mode) {
   const name = elements.name.value.trim();
   const code = elements.code.value.trim().toUpperCase();
@@ -136,7 +150,10 @@ async function enterRoom(mode) {
 
   try {
     const path = mode === "create" ? "/api/rooms" : `/api/rooms/${code}/join`;
-    const session = await request(path, { method: "POST", body: JSON.stringify({ name }) });
+    const session = await request(path, {
+      method: "POST",
+      body: JSON.stringify({ name, relayCapable: canRelayStage() }),
+    });
     startSession(session, name);
     if (microphoneDenied) {
       state.microphoneMuted = true;
@@ -160,6 +177,11 @@ function startSession(session, name) {
   state.iceServers = Array.isArray(session.iceServers) ? session.iceServers : [];
   state.iceRefreshSeconds = Number(session.iceRefreshSeconds) || 0;
   state.running = true;
+  state.stageParentId = state.isHost ? "" : state.hostId;
+  state.stageChildIds.clear();
+  state.stageStream = null;
+  state.topologyVersion = 0;
+  state.blockedStageEdges.clear();
   state.participants.clear();
   session.participants.forEach((participant) => state.participants.set(participant.id, participant));
   state.memberStates.set(state.clientId, { muted: state.microphoneMuted });
@@ -169,6 +191,8 @@ function startSession(session, name) {
   elements.codeLabel.textContent = state.roomCode;
   elements.selfName.textContent = name;
   elements.role.textContent = state.isHost ? "房主" : "参与者";
+  elements.topologyControl.hidden = !state.isHost;
+  elements.topologyToggle.checked = state.topologyEnabled;
   elements.share.hidden = !state.isHost;
   elements.windowAudioControl.hidden = !state.isHost;
   elements.windowAudioSelect.value = state.windowAudioMode;
@@ -223,7 +247,12 @@ function renderParticipants() {
     name.className = "participant-name";
     name.textContent = participant.name + (participant.id === state.clientId ? "（你）" : "");
     const role = document.createElement("small");
-    role.textContent = participant.isHost ? "房主" : (muted ? "已静音" : "通话中");
+    const isLocalRelay = participant.id === state.clientId
+      && state.topologyEnabled
+      && state.stageChildIds.size > 0;
+    role.textContent = participant.isHost
+      ? "房主"
+      : (isLocalRelay ? `画面中转 · ${state.stageChildIds.size}` : (muted ? "已静音" : "通话中"));
     name.append(role);
     const mic = document.createElement("span");
     mic.className = "participant-mic";
@@ -238,6 +267,67 @@ function renderParticipants() {
 function setNetworkState(online) {
   elements.network.classList.toggle("online", online);
   elements.network.lastChild.textContent = online ? " 已连接" : " 正在重连";
+}
+
+function currentTopologyPlan() {
+  const memberIds = [...state.participants.keys()];
+  const relayIds = memberIds.filter((id) => (
+    id === state.hostId || state.participants.get(id)?.relayCapable !== false
+  ));
+  return SyncastTopology.planTopology(memberIds, state.hostId, {
+    enabled: state.topologyEnabled,
+    relayIds,
+    blockedEdges: state.blockedStageEdges,
+  });
+}
+
+async function publishStageTopology() {
+  if (!state.isHost) return;
+  const plan = currentTopologyPlan();
+  const version = ++state.topologyVersion;
+  await Promise.all([...state.participants.keys()]
+    .filter((id) => id !== state.clientId)
+    .map((id) => sendSignal(id, {
+      channel: "stage-topology",
+      version,
+      enabled: state.topologyEnabled,
+      ...plan[id],
+    })));
+  await applyStageTopology({
+    version,
+    enabled: state.topologyEnabled,
+    ...plan[state.clientId],
+  });
+}
+
+async function applyStageTopology(assignment) {
+  const version = Number(assignment.version) || 0;
+  if (!state.isHost && version <= state.topologyVersion) return;
+  state.topologyVersion = version;
+  state.topologyEnabled = Boolean(assignment.enabled);
+  const oldParentId = state.stageParentId;
+  const parentId = state.isHost ? "" : String(assignment.parentId || state.hostId);
+  const childIds = new Set((assignment.childIds || [])
+    .filter((id) => id !== state.clientId && state.participants.has(id)));
+  state.stageParentId = parentId;
+  state.stageChildIds = childIds;
+
+  for (const [peerId, peer] of [...state.stagePeers]) {
+    const shouldBeOutbound = childIds.has(peerId);
+    const shouldRemain = peerId === parentId || shouldBeOutbound;
+    if (!shouldRemain || peer.outbound !== shouldBeOutbound) closeStagePeer(peerId);
+  }
+
+  if (!state.isHost && oldParentId && oldParentId !== parentId) {
+    state.stageStream = null;
+    elements.stageVideo.srcObject = null;
+    showStage(false);
+  }
+  if (state.isHost) state.stageStream = state.display;
+  elements.topologyToggle.checked = state.topologyEnabled;
+  renderParticipants();
+  updateMediaControls();
+  await connectStageChildren();
 }
 
 function updateMediaControls() {
@@ -258,7 +348,9 @@ function updateMediaControls() {
         ? (state.displaySurface === "window" ? "窗口独立音频" : "标签页音频 · 回音安全")
         : "系统音频 · 可能产生回音")
       : (state.displaySurface === "monitor" ? "整个屏幕 · 仅共享画面" : "当前来源 · 未共享声音"))
-    : "麦克风仅用于通话";
+    : (state.topologyEnabled && state.stageChildIds.size
+      ? `正在向 ${state.stageChildIds.size} 个节点转发画面`
+      : "麦克风仅用于通话");
 }
 
 async function sendSignal(peerId, data) {
@@ -273,9 +365,52 @@ async function sendSignal(peerId, data) {
   }
 }
 
+async function selectedStageRouteUsesTurn(pc) {
+  const stats = await pc.getStats();
+  return SyncastTopology.selectedRouteUsesTurn(stats);
+}
+
+async function inspectStageRoute(peerId, peer) {
+  if (!state.topologyEnabled
+      || peerId !== state.stageParentId
+      || state.stagePeers.get(peerId) !== peer
+      || peer.routeChecked) return;
+  try {
+    const usesTurn = await selectedStageRouteUsesTurn(peer.pc);
+    if (usesTurn === null) {
+      peer.routeCheckAttempts += 1;
+      if (peer.routeCheckAttempts < 3) setTimeout(() => inspectStageRoute(peerId, peer), 1000);
+      return;
+    }
+    peer.routeChecked = true;
+    if (usesTurn) {
+      await sendSignal(state.hostId, { channel: "stage-route-degraded", parentId: peerId });
+    }
+  } catch (error) {
+    console.warn("Unable to inspect stage route", error);
+  }
+}
+
+function blockStageEdge(childId, parentId) {
+  let blockedParents = state.blockedStageEdges.get(childId);
+  if (!blockedParents) {
+    blockedParents = new Set();
+    state.blockedStageEdges.set(childId, blockedParents);
+  }
+  if (blockedParents.has(parentId)) return false;
+  blockedParents.add(parentId);
+  return true;
+}
+
 function buildPeer(channel, peerId) {
   const pc = new RTCPeerConnection({ iceServers: state.iceServers });
-  const peer = { pc, candidates: [] };
+  const peer = {
+    pc,
+    candidates: [],
+    routeChecked: false,
+    routeCheckScheduled: false,
+    routeCheckAttempts: 0,
+  };
   pc.onicecandidate = ({ candidate }) => {
     if (candidate) sendSignal(peerId, { channel, candidate });
   };
@@ -283,6 +418,19 @@ function buildPeer(channel, peerId) {
     const connected = [...state.voicePeers.values()].some((item) => item.pc.connectionState === "connected");
     elements.voiceStatus.textContent = state.participants.size === 1 || connected ? "语音已连接" : "语音连接中";
     if (["failed", "closed"].includes(pc.connectionState) && channel === "voice") removeRemoteAudio(peerId);
+    if (pc.connectionState === "connected"
+        && channel === "stage"
+        && peerId === state.stageParentId
+        && !peer.routeCheckScheduled) {
+      peer.routeCheckScheduled = true;
+      setTimeout(() => inspectStageRoute(peerId, peer), 500);
+    }
+    if (pc.connectionState === "failed"
+        && channel === "stage"
+        && state.topologyEnabled
+        && peerId === state.stageParentId) {
+      sendSignal(state.hostId, { channel: "stage-route-failed", parentId: peerId });
+    }
   };
   return peer;
 }
@@ -321,8 +469,9 @@ async function offerVoice(peerId) {
 }
 
 function requestStageQuality() {
-  if (!state.isHost && state.hostId) {
-    sendSignal(state.hostId, { channel: "stage-quality", quality: state.preferredQuality });
+  if (!state.isHost && state.stageParentId) {
+    const quality = state.stageChildIds.size ? "high" : state.preferredQuality;
+    sendSignal(state.stageParentId, { channel: "stage-quality", quality });
   }
 }
 
@@ -340,6 +489,7 @@ async function updateDisplayFrameRate() {
 }
 
 async function applyStageQuality(peerId, requestedQuality) {
+  if (!state.stageChildIds.has(peerId)) return;
   const quality = Object.hasOwn(QUALITY_PROFILES, requestedQuality) ? requestedQuality : DEFAULT_QUALITY;
   const profile = QUALITY_PROFILES[quality];
   state.stageQualities.set(peerId, quality);
@@ -365,16 +515,37 @@ async function applyStageQuality(peerId, requestedQuality) {
   }
 }
 
-function createStagePeer(peerId) {
+function getStageSourceStream() {
+  return state.isHost ? state.display : state.stageStream;
+}
+
+function hasLiveStageSource() {
+  return getStageSourceStream()?.getVideoTracks().some((track) => track.readyState === "live");
+}
+
+function createStagePeer(peerId, outbound = false) {
   const old = state.stagePeers.get(peerId);
+  if (old?.outbound === outbound) return old;
   if (old) old.pc.close();
   const peer = buildPeer("stage", peerId);
+  peer.outbound = outbound;
+  peer.remoteStream = null;
   state.stagePeers.set(peerId, peer);
-  if (state.isHost && state.display) {
-    state.display.getTracks().forEach((track) => peer.pc.addTrack(track, state.display));
+  const source = getStageSourceStream();
+  if (outbound && source) {
+    source.getTracks()
+      .filter((track) => track.readyState === "live")
+      .forEach((track) => {
+        track.contentHint = track.kind === "video" ? "motion" : "music";
+        peer.pc.addTrack(track, source);
+      });
   }
   peer.pc.ontrack = (event) => {
-    const stream = event.streams[0] || new MediaStream([event.track]);
+    if (peer.outbound) return;
+    const stream = event.streams[0] || peer.remoteStream || new MediaStream();
+    if (!event.streams[0] && !stream.getTracks().includes(event.track)) stream.addTrack(event.track);
+    peer.remoteStream = stream;
+    state.stageStream = stream;
     if (elements.stageVideo.srcObject !== stream) elements.stageVideo.srcObject = stream;
     showStage(true);
     elements.stageVideo.play().catch(() => {
@@ -383,8 +554,24 @@ function createStagePeer(peerId) {
       updateMediaControls();
       showToast("点击“共享声音”开启直播声音");
     });
+    if (event.track.kind === "video") {
+      requestStageQuality();
+      connectStageChildren().catch((error) => console.warn("Unable to connect stage children", error));
+    }
   };
   return peer;
+}
+
+async function connectStageChildren() {
+  if (!hasLiveStageSource()) return;
+  const pending = [...state.stageChildIds]
+    .filter((peerId) => !state.stagePeers.get(peerId)?.outbound)
+    .map(offerStage);
+  const results = await Promise.allSettled(pending);
+  for (const result of results) {
+    if (result.status === "rejected") console.warn("Unable to offer stage to child", result.reason);
+  }
+  requestStageQuality();
 }
 
 async function configureStageAudioSender(peer) {
@@ -403,19 +590,22 @@ async function configureStageAudioSender(peer) {
 }
 
 async function offerStage(peerId) {
-  if (!state.display) return;
-  const peer = createStagePeer(peerId);
+  if (!state.stageChildIds.has(peerId) || !hasLiveStageSource()) return;
+  const peer = createStagePeer(peerId, true);
   const offer = SyncastMedia.enhanceSystemAudio(await peer.pc.createOffer());
   await peer.pc.setLocalDescription(offer);
   await sendSignal(peerId, { channel: "stage", description: peer.pc.localDescription });
 }
 
 async function applyDescription(channel, peerId, description) {
-  const peer = channel === "voice" ? createVoicePeer(peerId) : (state.stagePeers.get(peerId) || createStagePeer(peerId));
+  const peer = channel === "voice"
+    ? createVoicePeer(peerId)
+    : (state.stagePeers.get(peerId) || createStagePeer(peerId, state.stageChildIds.has(peerId)));
   const remoteDescription = channel === "stage" ? SyncastMedia.enhanceSystemAudio(description) : description;
   await peer.pc.setRemoteDescription(remoteDescription);
-  if (channel === "stage" && description.type === "answer" && state.isHost) {
+  if (channel === "stage" && description.type === "answer" && peer.outbound) {
     await configureStageAudioSender(peer);
+    await applyStageQuality(peerId, state.stageQualities.get(peerId) || DEFAULT_QUALITY);
   }
   for (const candidate of peer.candidates.splice(0)) await peer.pc.addIceCandidate(candidate);
   if (description.type === "offer") {
@@ -430,7 +620,9 @@ async function applyDescription(channel, peerId, description) {
 async function applyCandidate(channel, peerId, candidate) {
   const collection = channel === "voice" ? state.voicePeers : state.stagePeers;
   let peer = collection.get(peerId);
-  if (!peer) peer = channel === "voice" ? createVoicePeer(peerId) : createStagePeer(peerId);
+  if (!peer) peer = channel === "voice"
+    ? createVoicePeer(peerId)
+    : createStagePeer(peerId, state.stageChildIds.has(peerId));
   if (peer.pc.remoteDescription) await peer.pc.addIceCandidate(candidate);
   else peer.candidates.push(candidate);
 }
@@ -438,21 +630,41 @@ async function applyCandidate(channel, peerId, candidate) {
 async function handleSignal(payload) {
   const peerId = payload.from;
   const data = payload.data || {};
+  if (data.channel === "stage-topology") {
+    if (peerId === state.hostId) await applyStageTopology(data);
+    return;
+  }
+  if (["stage-route-failed", "stage-route-degraded"].includes(data.channel)) {
+    const assignedParentId = state.isHost ? currentTopologyPlan()[peerId]?.parentId : "";
+    if (state.isHost
+        && state.topologyEnabled
+        && data.parentId === assignedParentId
+        && blockStageEdge(peerId, data.parentId)) {
+      await publishStageTopology();
+    }
+    return;
+  }
   if (data.channel === "member-state") {
     state.memberStates.set(peerId, { muted: Boolean(data.muted) });
     renderParticipants();
     return;
   }
   if (data.channel === "stage-stop") {
-    closeStagePeer(peerId);
-    if (!state.isHost) showStage(false);
+    if (peerId === state.hostId) {
+      for (const stagePeerId of [...state.stagePeers.keys()]) closeStagePeer(stagePeerId);
+      state.stageStream = null;
+      if (!state.isHost) showStage(false);
+    }
     return;
   }
   if (data.channel === "stage-quality") {
-    if (state.isHost) await applyStageQuality(peerId, data.quality);
+    if (state.stageChildIds.has(peerId)) await applyStageQuality(peerId, data.quality);
     return;
   }
   if (!['voice', 'stage'].includes(data.channel)) return;
+  if (data.channel === "stage"
+      && peerId !== state.stageParentId
+      && !state.stageChildIds.has(peerId)) return;
   try {
     if (data.description) await applyDescription(data.channel, peerId, data.description);
     else if (data.candidate) await applyCandidate(data.channel, peerId, data.candidate);
@@ -468,16 +680,26 @@ async function handleEvent(event) {
     state.participants.set(payload.id, payload);
     renderParticipants();
     await offerVoice(payload.id);
-    if (state.isHost && state.display) await offerStage(payload.id);
+    if (state.isHost) await publishStageTopology();
     return;
   }
   if (event.type === "participant-left") {
     state.participants.delete(payload.id);
     state.memberStates.delete(payload.id);
     state.stageQualities.delete(payload.id);
+    state.blockedStageEdges.delete(payload.id);
+    for (const blockedParents of state.blockedStageEdges.values()) blockedParents.delete(payload.id);
     closePeer(state.voicePeers, payload.id);
     closeStagePeer(payload.id);
-    if (state.isHost) updateDisplayFrameRate();
+    if (payload.id === state.stageParentId) {
+      state.stageStream = null;
+      elements.stageVideo.srcObject = null;
+      showStage(false);
+    }
+    if (state.isHost) {
+      await updateDisplayFrameRate();
+      await publishStageTopology();
+    }
     removeRemoteAudio(payload.id);
     renderParticipants();
     return;
@@ -538,6 +760,7 @@ async function startSharing() {
       windowAudio: SyncastMedia.getWindowAudioPreference(state.windowAudioMode),
     });
     state.display = display;
+    state.stageStream = display;
     const displayTrack = display.getVideoTracks()[0];
     state.displaySurface = displayTrack.getSettings().displaySurface || "unknown";
     state.sharedSoundEnabled = true;
@@ -579,7 +802,7 @@ async function startSharing() {
     } else if (!display.getAudioTracks().length) {
       showToast("当前标签页没有共享声音，请在选择器中勾选标签页音频");
     }
-    await Promise.all([...state.participants.keys()].filter((id) => id !== state.clientId).map(offerStage));
+    await publishStageTopology();
   } catch (error) {
     if (error.name !== "NotAllowedError") showToast("无法开始屏幕共享");
   }
@@ -589,6 +812,7 @@ function stopSharing() {
   if (!state.display) return;
   const display = state.display;
   state.display = null;
+  state.stageStream = null;
   state.displaySurface = "";
   display.getTracks().forEach((track) => track.stop());
   for (const participant of state.participants.values()) {
@@ -689,6 +913,14 @@ elements.copy.addEventListener("click", async () => {
   showToast("房间码已复制");
 });
 elements.share.addEventListener("click", () => state.display ? stopSharing() : startSharing());
+elements.topologyToggle.addEventListener("change", async () => {
+  if (!state.isHost) return;
+  state.topologyEnabled = elements.topologyToggle.checked;
+  state.blockedStageEdges.clear();
+  localStorage.setItem("syncast-tree-topology", String(state.topologyEnabled));
+  await publishStageTopology();
+  showToast(state.topologyEnabled ? "动态树状转发已开启" : "已恢复房主直连");
+});
 elements.windowAudioSelect.addEventListener("change", () => {
   state.windowAudioMode = elements.windowAudioSelect.value === "system" ? "system" : "isolated";
   localStorage.setItem("syncast-window-audio", state.windowAudioMode);
@@ -719,6 +951,7 @@ const savedQuality = localStorage.getItem("syncast-quality");
 if (Object.hasOwn(QUALITY_PROFILES, savedQuality)) state.preferredQuality = savedQuality;
 const savedWindowAudioMode = localStorage.getItem("syncast-window-audio");
 if (["isolated", "system"].includes(savedWindowAudioMode)) state.windowAudioMode = savedWindowAudioMode;
+state.topologyEnabled = localStorage.getItem("syncast-tree-topology") === "true";
 elements.name.value = localStorage.getItem("lan-live-name") || "";
 elements.name.addEventListener("change", () => localStorage.setItem("lan-live-name", elements.name.value.trim()));
 

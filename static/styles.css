@@ -145,6 +145,14 @@ input::placeholder { color: #59625c; }
 .sidebar-heading { height: 76px; flex: 0 0 auto; display: flex; align-items: center; justify-content: space-between; padding: 0 18px; border-bottom: 1px solid var(--line); }
 .sidebar-heading .eyebrow { margin-bottom: 5px; font-size: 9px; }
 .sidebar-heading h2 { margin: 0; font-size: 15px; font-weight: 650; }
+.sidebar-actions { display: flex; align-items: center; gap: 10px; }
+.topology-control { display: flex; align-items: center; gap: 6px; color: #778179; cursor: pointer; font-size: 10px; }
+.topology-control input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+.topology-switch { width: 28px; height: 16px; padding: 2px; border: 1px solid #414a43; border-radius: 8px; background: #202521; transition: .16s ease; }
+.topology-switch span { display: block; width: 10px; height: 10px; border-radius: 50%; background: #737d76; transition: .16s ease; }
+.topology-control input:checked + .topology-switch { border-color: #477255; background: #1b3122; }
+.topology-control input:checked + .topology-switch span { background: var(--green); transform: translateX(12px); }
+.topology-control input:focus-visible + .topology-switch { outline: 2px solid #6c8673; outline-offset: 2px; }
 .member-count { min-width: 26px; height: 22px; display: grid; place-items: center; border: 1px solid #343c36; border-radius: 3px; color: var(--muted); font-size: 11px; }
 .participant-list { flex: 1; min-height: 0; overflow-y: auto; padding: 10px; }
 .participant { height: 52px; display: grid; grid-template-columns: 34px minmax(0, 1fr) 22px; align-items: center; gap: 10px; padding: 0 8px; border-radius: 4px; }
