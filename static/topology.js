@@ -56,27 +56,48 @@
         Number(blockedParentsFor(left).has(hostId)) - Number(blockedParentsFor(right).has(hostId))
       ));
     const leafGuests = guests.filter((id) => !relayGuests.includes(id));
-    const parentQueue = [hostId];
-
-    for (const id of [...relayGuests, ...leafGuests]) {
-      const blockedParents = blockedParentsFor(id);
-      const parentId = parentQueue.find((candidateId) => (
-        plan[candidateId].depth < maxDepth
-        && plan[candidateId].childIds.length < maxChildren
-        && !blockedParents.has(candidateId)
-      )) || parentQueue.find((candidateId) => (
-        plan[candidateId].depth < maxDepth
-        && plan[candidateId].childIds.length < maxChildren
-      )) || hostId;
+    const attached = new Set([hostId]);
+    const previous = options.previousPlan || {};
+    const canParent = (id) => attached.has(id)
+      && (id === hostId || relayIds.has(id))
+      && plan[id].depth < maxDepth
+      && plan[id].childIds.length < maxChildren;
+    const attach = (id, parentId) => {
       plan[id].parentId = parentId;
       plan[id].depth = plan[parentId].depth + 1;
       plan[parentId].childIds.push(id);
-      if (relayIds.has(id) && plan[id].depth < maxDepth) {
-        parentQueue.push(id);
+      attached.add(id);
+    };
+    // Preserve valid branches before allocating new members. Process parents
+    // first; never trust a supplied depth or carry a cycle into the new tree.
+    for (let depth = 0; depth < maxDepth; depth += 1) {
+      for (const id of [...relayGuests, ...leafGuests]) {
+        const parentId = previous[id]?.parentId;
+        if (!attached.has(id) && canParent(parentId)
+            && !blockedParentsFor(id).has(parentId)) attach(id, parentId);
       }
     }
 
+    for (const id of [...relayGuests, ...leafGuests]) {
+      if (attached.has(id)) continue;
+      const parents = [...attached].filter(canParent);
+      const available = parents.filter((parentId) => !blockedParentsFor(id).has(parentId));
+      const candidates = available.length ? available : parents;
+      // Short paths first, then spread new viewers over available relays.
+      candidates.sort((a, b) => plan[a].depth - plan[b].depth
+        || plan[a].childIds.length - plan[b].childIds.length);
+      attach(id, candidates[0] || hostId);
+    }
+
     return plan;
+  }
+
+  function updateAutoRelay(previous, { viewers, pressured, sharing }) {
+    if (!sharing || viewers < 4) return { enabled: false, pressureSamples: 0 };
+    const pressureSamples = pressured ? previous.pressureSamples + 1 : 0;
+    // Keep the decision for this share to avoid repeatedly moving viewers
+    // when offloading the host makes the pressure disappear.
+    return { enabled: previous.enabled || pressureSamples >= 3, pressureSamples };
   }
 
   const api = {
@@ -84,6 +105,7 @@
     DEFAULT_MAX_DEPTH,
     planTopology,
     selectedRouteUsesTurn,
+    updateAutoRelay,
   };
   global.SyncastTopology = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;

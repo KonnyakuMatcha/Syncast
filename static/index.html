@@ -67,15 +67,28 @@
             <h2>通话频道</h2>
           </div>
           <div class="sidebar-actions">
-            <label id="topology-control" class="topology-control" hidden title="动态树状转发">
-              <input id="topology-toggle" type="checkbox">
-              <span class="topology-switch" aria-hidden="true"><span></span></span>
-              <span>树状</span>
+            <label id="topology-control" class="topology-control" hidden>
+              <select id="topology-mode" aria-label="直播连接方式">
+                <option value="auto">自动</option>
+                <option value="direct">优先直连</option>
+                <option value="relay">节省上传</option>
+              </select>
             </label>
             <span id="member-count" class="member-count">1</span>
           </div>
         </div>
         <div id="participant-list" class="participant-list"></div>
+        <section id="topology-panel" class="topology-panel" aria-labelledby="topology-title">
+          <header class="topology-panel-heading">
+            <div>
+              <p class="eyebrow">STAGE TOPOLOGY</p>
+              <h3 id="topology-title">转发拓扑</h3>
+            </div>
+            <span id="topology-state" class="topology-state">星型</span>
+          </header>
+          <div id="topology-map" class="topology-map"></div>
+          <small class="topology-hint">语音仍为成员间 mesh 直连</small>
+        </section>
         <div class="channel-status">
           <span class="channel-pulse"></span>
           <div><strong id="voice-status">语音已连接</strong><small>WebRTC 加密传输</small></div>

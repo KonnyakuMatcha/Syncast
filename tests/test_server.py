@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 import threading
+import time
 import unittest
 from http.client import HTTPConnection
 from pathlib import Path
@@ -13,6 +14,52 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import server
+
+
+class RoomLifecycleTests(unittest.TestCase):
+    def setUp(self):
+        self.store = server.RoomStore()
+        self.room, self.host = self.store.create('Host')
+        _, self.guest = self.store.join(self.room.code, 'Guest')
+
+    def test_active_host_request_removes_stale_guest(self):
+        self.guest.last_seen = time.time() - server.PARTICIPANT_TTL_SECONDS - 1
+        self.store.authenticate(self.room.code, self.host.client_id, self.host.session_token)
+        self.assertNotIn(self.guest.client_id, self.room.participants)
+        self.assertEqual(self.room.events[-1]['type'], 'participant-left')
+
+    def test_expired_session_cannot_revive_itself(self):
+        self.guest.last_seen = time.time() - server.PARTICIPANT_TTL_SECONDS - 1
+        with self.assertRaises(PermissionError):
+            self.store.authenticate(self.room.code, self.guest.client_id, self.guest.session_token)
+
+    def test_room_expiration_is_enforced_on_existing_sessions(self):
+        self.room.created_at = time.time() - server.ROOM_TTL_SECONDS - 1
+        with self.assertRaises(PermissionError):
+            self.store.authenticate(self.room.code, self.host.client_id, self.host.session_token)
+        self.assertNotIn(self.room.code, self.store.rooms)
+        self.assertEqual(self.room.events[-1]['type'], 'room-closed')
+
+    def test_new_room_creation_cleans_abandoned_rooms(self):
+        self.host.last_seen = time.time() - server.PARTICIPANT_TTL_SECONDS - 1
+        self.store.create('New host')
+        self.assertNotIn(self.room.code, self.store.rooms)
+
+    def test_room_capacity_and_slot_reuse(self):
+        for index in range(server.MAX_PARTICIPANTS - 2):
+            self.store.join(self.room.code, f'Guest {index}')
+        with self.assertRaises(ValueError):
+            self.store.join(self.room.code, 'Overflow')
+        self.store.leave(self.room.code, self.guest.client_id, self.guest.session_token)
+        self.store.join(self.room.code, 'Replacement')
+        self.assertEqual(len(self.room.participants), server.MAX_PARTICIPANTS)
+
+    def test_host_departure_closes_room(self):
+        self.store.leave(self.room.code, self.host.client_id, self.host.session_token)
+        self.assertNotIn(self.room.code, self.store.rooms)
+        self.assertEqual(self.room.events[-1]['type'], 'room-closed')
+        with self.assertRaises(PermissionError):
+            self.store.authenticate(self.room.code, self.guest.client_id, self.guest.session_token)
 
 
 class LiveServerTests(unittest.TestCase):
@@ -62,11 +109,13 @@ class LiveServerTests(unittest.TestCase):
         self.assertIn("点对点直播与语音协作", body)
         self.assertIn('href="styles.css"', body)
         self.assertIn('src="app.js"', body)
+        self.assertIn('id="topology-map"', body)
         self.assertNotIn('href="/styles.css"', body)
         self.assertIn('<option value="high" selected>高帧 · 1080p60</option>', body)
-        self.assertIn('id="topology-toggle"', body)
+        self.assertIn('id="topology-mode"', body)
         self.assertIn('src="topology.js"', body)
-        self.assertNotIn('<option value="auto">', body)
+        quality_options = body.split('id="quality-select"', 1)[1].split('</select>', 1)[0]
+        self.assertNotIn('<option value="auto">', quality_options)
 
     def test_room_join_and_directed_signal(self) -> None:
         status, host = self.request("POST", "/api/rooms", {"name": "Host"})

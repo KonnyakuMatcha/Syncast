@@ -129,6 +129,7 @@ class RoomStore:
 
     def create(self, name: str, relay_capable: bool = True) -> tuple[Room, Participant]:
         with self.lock:
+            self.cleanup()
             while True:
                 code = "".join(secrets.choice(ROOM_ALPHABET) for _ in range(6))
                 if code not in self.rooms:
@@ -153,6 +154,7 @@ class RoomStore:
 
     def authenticate(self, code: str, client_id: str, session_token: str) -> tuple[Room, Participant]:
         with self.lock:
+            self.cleanup()
             room = self.rooms.get(code.upper())
             participant = room.participants.get(client_id) if room else None
             if (
@@ -176,6 +178,10 @@ class RoomStore:
                 self.rooms.pop(room.code, None)
 
     def cleanup(self) -> None:
+        with self.lock:
+            self._cleanup_locked()
+
+    def _cleanup_locked(self) -> None:
         now = time.time()
         expired_rooms: list[str] = []
         for code, room in list(self.rooms.items()):
@@ -204,6 +210,13 @@ STORE = RoomStore()
 
 class LiveHandler(BaseHTTPRequestHandler):
     server_version = "Syncast/1.1"
+
+    def handle(self) -> None:
+        try:
+            super().handle()
+        except (BrokenPipeError, ConnectionResetError, ssl.SSLEOFError):
+            # A tab may leave or abort its long poll before the reply arrives.
+            self.close_connection = True
 
     def log_message(self, fmt: str, *args) -> None:
         print(f"[{self.log_date_time_string()}] {fmt % args}")

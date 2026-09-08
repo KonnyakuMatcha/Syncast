@@ -6,6 +6,7 @@ const {
   DEFAULT_MAX_DEPTH,
   planTopology,
   selectedRouteUsesTurn,
+  updateAutoRelay,
 } = require("../static/topology.js");
 
 const members = ["host", "a", "b", "c", "d", "e", "f", "g"];
@@ -17,8 +18,9 @@ const tree = planTopology(members, "host", { enabled: true });
 assert.equal(DEFAULT_MAX_CHILDREN, 3);
 assert.equal(DEFAULT_MAX_DEPTH, 2);
 assert.deepEqual(tree.host.childIds, ["a", "b", "c"]);
-assert.deepEqual(tree.a.childIds, ["d", "e", "f"]);
-assert.deepEqual(tree.b.childIds, ["g"]);
+assert.deepEqual(tree.a.childIds, ["d", "g"]);
+assert.deepEqual(tree.b.childIds, ["e"]);
+assert.deepEqual(tree.c.childIds, ["f"]);
 assert.equal(Math.max(...Object.values(tree).map((node) => node.depth)), 2);
 
 const fullRoom = planTopology(
@@ -63,5 +65,38 @@ function routeStats(localType, remoteType) {
 assert.equal(selectedRouteUsesTurn(routeStats("host", "srflx")), false);
 assert.equal(selectedRouteUsesTurn(routeStats("relay", "srflx")), true);
 assert.equal(selectedRouteUsesTurn(new Map()), null);
+
+const added = planTopology([...members, 'h'], 'host', { enabled: true, previousPlan: tree });
+for (const id of members) assert.equal(added[id].parentId, tree[id].parentId);
+const departed = planTopology(members.filter(id => id !== 'a'), 'host', {
+  enabled: true, previousPlan: tree,
+});
+for (const id of ['b', 'c', 'e', 'f']) assert.equal(departed[id].parentId, tree[id].parentId);
+for (const id of ['d', 'g']) assert.notEqual(departed[id].parentId, 'a');
+const cyclicPrevious = planTopology(members, 'host', {
+  enabled: true, previousPlan: { a: { parentId: 'b' }, b: { parentId: 'a' } },
+});
+for (const id of members) {
+  const visited = new Set();
+  let cursor = id;
+  while (cursor) {
+    assert.ok(!visited.has(cursor), 'Topology must be acyclic');
+    visited.add(cursor);
+    cursor = cyclicPrevious[cursor].parentId;
+  }
+}
+
+let auto = { enabled: false, pressureSamples: 0 };
+const pressure = { viewers: 7, sharing: true, pressured: true };
+auto = updateAutoRelay(auto, pressure);
+auto = updateAutoRelay(auto, pressure);
+assert.equal(auto.enabled, false, 'A brief spike should not move viewers');
+auto = updateAutoRelay(auto, { ...pressure, pressured: false });
+assert.equal(auto.pressureSamples, 0);
+for (let i = 0; i < 3; i++) auto = updateAutoRelay(auto, pressure);
+assert.equal(auto.enabled, true);
+assert.equal(updateAutoRelay(auto, { ...pressure, pressured: false }).enabled, true);
+assert.equal(updateAutoRelay(auto, { ...pressure, sharing: false }).enabled, false);
+assert.equal(updateAutoRelay(auto, { ...pressure, viewers: 3 }).enabled, false);
 
 console.log("topology planner tests passed");
