@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const {
   SYSTEM_AUDIO_BITRATE,
   enhanceSystemAudio,
+  getWindowAudioPreference,
   isIsolatedAudioSafe,
   isRelayCandidate,
   stripRelayCandidates,
@@ -36,9 +37,13 @@ const withoutFmtp = enhanceSystemAudio({
 assert.match(withoutFmtp.sdp, /a=rtpmap:109 opus\/48000\/2\r\na=fmtp:109 /);
 
 assert.equal(isIsolatedAudioSafe("browser"), true);
-assert.equal(isIsolatedAudioSafe("window"), true);
+assert.equal(isIsolatedAudioSafe("window", "isolated"), true);
+assert.equal(isIsolatedAudioSafe("window", "system"), false);
 assert.equal(isIsolatedAudioSafe("monitor"), false);
 assert.equal(isIsolatedAudioSafe(undefined), false);
+assert.equal(getWindowAudioPreference("isolated"), "window");
+assert.equal(getWindowAudioPreference("system"), "system");
+assert.equal(getWindowAudioPreference("unexpected"), "window");
 
 assert.equal(isRelayCandidate({ candidate: "candidate:1 1 udp 1 192.0.2.1 5000 typ host" }), false);
 assert.equal(isRelayCandidate({ candidate: "candidate:2 1 udp 1 198.51.100.1 6000 typ srflx" }), false);

@@ -66,9 +66,29 @@
             <p class="eyebrow">VOICE CHANNEL</p>
             <h2>通话频道</h2>
           </div>
-          <span id="member-count" class="member-count">1</span>
+          <div class="sidebar-actions">
+            <label id="topology-control" class="topology-control" hidden>
+              <select id="topology-mode" aria-label="直播连接方式">
+                <option value="auto">自动</option>
+                <option value="direct">优先直连</option>
+                <option value="relay">节省上传</option>
+              </select>
+            </label>
+            <span id="member-count" class="member-count">1</span>
+          </div>
         </div>
         <div id="participant-list" class="participant-list"></div>
+        <section id="topology-panel" class="topology-panel" aria-labelledby="topology-title">
+          <header class="topology-panel-heading">
+            <div>
+              <p class="eyebrow">STAGE TOPOLOGY</p>
+              <h3 id="topology-title">转发拓扑</h3>
+            </div>
+            <span id="topology-state" class="topology-state">星型</span>
+          </header>
+          <div id="topology-map" class="topology-map"></div>
+          <small class="topology-hint">语音仍为成员间 mesh 直连</small>
+        </section>
         <div class="channel-status">
           <span class="channel-pulse"></span>
           <div><strong id="voice-status">语音已连接</strong><small>WebRTC 加密传输</small></div>
@@ -82,10 +102,12 @@
         <strong id="self-name"></strong>
       </div>
       <div class="controls">
-        <label id="topology-control" class="topology-control" hidden>
-          <input id="topology-toggle" type="checkbox">
-          <span class="toggle-track" aria-hidden="true"><span></span></span>
-          <span>带宽分担</span>
+        <label id="window-audio-control" class="quality-control" hidden>
+          <span>窗口音频</span>
+          <select id="window-audio-select" aria-label="窗口音频模式">
+            <option value="isolated" selected>独立音频</option>
+            <option value="system">系统混音</option>
+          </select>
         </label>
         <label id="quality-control" class="quality-control" hidden>
           <span>观看画质</span>
@@ -115,8 +137,8 @@
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <div id="remote-audio" hidden></div>
-  <script src="media.js"></script>
   <script src="topology.js"></script>
+  <script src="media.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

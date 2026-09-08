@@ -1,54 +1,112 @@
 (function (global) {
   "use strict";
 
-  const DEFAULT_DIRECT_THRESHOLD = 3;
-  const DEFAULT_MAX_CHILDREN = 2;
+  const DEFAULT_MAX_CHILDREN = 3;
+  const DEFAULT_MAX_DEPTH = 2;
 
-  function planTopology({
-    hostId,
-    participantIds,
-    capabilities = {},
-    enabled = false,
-    directThreshold = DEFAULT_DIRECT_THRESHOLD,
-    maxChildren = DEFAULT_MAX_CHILDREN,
-  }) {
-    const viewers = [...new Set(participantIds)].filter((id) => id && id !== hostId).sort();
-    const parents = Object.fromEntries(viewers.map((id) => [id, hostId]));
-    const children = { [hostId]: [...viewers] };
-    if (!enabled || viewers.length <= directThreshold) {
-      return { parents, children, relays: [] };
+  function selectedRouteUsesTurn(stats) {
+    let pair;
+    for (const report of stats.values()) {
+      if (report.type === "transport" && report.selectedCandidatePairId) {
+        pair = stats.get(report.selectedCandidatePairId);
+        break;
+      }
+    }
+    if (!pair) {
+      pair = [...stats.values()].find((report) => (
+        report.type === "candidate-pair" && report.nominated && report.state === "succeeded"
+      ));
+    }
+    if (!pair) return null;
+    const local = stats.get(pair.localCandidateId);
+    const remote = stats.get(pair.remoteCandidateId);
+    return local?.candidateType === "relay" || remote?.candidateType === "relay";
+  }
+
+  function planTopology(memberIds, hostId, options = {}) {
+    const orderedIds = [...new Set(memberIds)].filter(Boolean);
+    if (!orderedIds.includes(hostId)) orderedIds.unshift(hostId);
+    const enabled = Boolean(options.enabled);
+    const maxChildren = Math.max(1, Number(options.maxChildren) || DEFAULT_MAX_CHILDREN);
+    const maxDepth = Math.max(1, Number(options.maxDepth) || DEFAULT_MAX_DEPTH);
+    const relayIds = new Set(options.relayIds || orderedIds);
+    const blockedEdges = options.blockedEdges;
+    const blockedParentsFor = (id) => new Set(
+      blockedEdges instanceof Map ? blockedEdges.get(id) : blockedEdges?.[id],
+    );
+    const plan = Object.fromEntries(orderedIds.map((id) => [id, {
+      parentId: "",
+      childIds: [],
+      depth: id === hostId ? 0 : 1,
+    }]));
+
+    if (!enabled) {
+      for (const id of orderedIds) {
+        if (id === hostId) continue;
+        plan[id].parentId = hostId;
+        plan[hostId].childIds.push(id);
+      }
+      return plan;
     }
 
-    const targetRoots = Math.ceil(viewers.length / (maxChildren + 1));
-    const candidates = viewers
-      .filter((id) => capabilities[id]?.eligible)
-      .sort((left, right) => {
-        const scoreDifference = Number(capabilities[right]?.score || 0) - Number(capabilities[left]?.score || 0);
-        return scoreDifference || left.localeCompare(right);
-      });
-    const relays = candidates.slice(0, targetRoots);
-    if (!relays.length) return { parents, children, relays: [] };
-
-    children[hostId] = [...relays];
-    for (const relayId of relays) children[relayId] = [];
-
-    for (const viewerId of viewers.filter((id) => !relays.includes(id))) {
-      const relayId = relays
-        .filter((id) => children[id].length < maxChildren)
-        .filter((id) => capabilities[id]?.connectedPeers?.includes(viewerId))
-        .sort((left, right) => children[left].length - children[right].length)[0];
-      if (relayId) {
-        parents[viewerId] = relayId;
-        children[relayId].push(viewerId);
-      } else {
-        children[hostId].push(viewerId);
+    const guests = orderedIds.filter((id) => id !== hostId);
+    const relayGuests = guests
+      .filter((id) => relayIds.has(id))
+      .sort((left, right) => (
+        Number(blockedParentsFor(left).has(hostId)) - Number(blockedParentsFor(right).has(hostId))
+      ));
+    const leafGuests = guests.filter((id) => !relayGuests.includes(id));
+    const attached = new Set([hostId]);
+    const previous = options.previousPlan || {};
+    const canParent = (id) => attached.has(id)
+      && (id === hostId || relayIds.has(id))
+      && plan[id].depth < maxDepth
+      && plan[id].childIds.length < maxChildren;
+    const attach = (id, parentId) => {
+      plan[id].parentId = parentId;
+      plan[id].depth = plan[parentId].depth + 1;
+      plan[parentId].childIds.push(id);
+      attached.add(id);
+    };
+    // Preserve valid branches before allocating new members. Process parents
+    // first; never trust a supplied depth or carry a cycle into the new tree.
+    for (let depth = 0; depth < maxDepth; depth += 1) {
+      for (const id of [...relayGuests, ...leafGuests]) {
+        const parentId = previous[id]?.parentId;
+        if (!attached.has(id) && canParent(parentId)
+            && !blockedParentsFor(id).has(parentId)) attach(id, parentId);
       }
     }
 
-    return { parents, children, relays };
+    for (const id of [...relayGuests, ...leafGuests]) {
+      if (attached.has(id)) continue;
+      const parents = [...attached].filter(canParent);
+      const available = parents.filter((parentId) => !blockedParentsFor(id).has(parentId));
+      const candidates = available.length ? available : parents;
+      // Short paths first, then spread new viewers over available relays.
+      candidates.sort((a, b) => plan[a].depth - plan[b].depth
+        || plan[a].childIds.length - plan[b].childIds.length);
+      attach(id, candidates[0] || hostId);
+    }
+
+    return plan;
   }
 
-  const api = { DEFAULT_DIRECT_THRESHOLD, DEFAULT_MAX_CHILDREN, planTopology };
+  function updateAutoRelay(previous, { viewers, pressured, sharing }) {
+    if (!sharing || viewers < 4) return { enabled: false, pressureSamples: 0 };
+    const pressureSamples = pressured ? previous.pressureSamples + 1 : 0;
+    // Keep the decision for this share to avoid repeatedly moving viewers
+    // when offloading the host makes the pressure disappear.
+    return { enabled: previous.enabled || pressureSamples >= 3, pressureSamples };
+  }
+
+  const api = {
+    DEFAULT_MAX_CHILDREN,
+    DEFAULT_MAX_DEPTH,
+    planTopology,
+    selectedRouteUsesTurn,
+    updateAutoRelay,
+  };
   global.SyncastTopology = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof globalThis !== "undefined" ? globalThis : window);

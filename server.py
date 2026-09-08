@@ -43,6 +43,7 @@ def build_ice_servers() -> list[dict]:
 class Participant:
     client_id: str
     name: str
+    relay_capable: bool = True
     session_token: str = field(default_factory=lambda: secrets.token_urlsafe(32))
     joined_at: float = field(default_factory=time.time)
     last_seen: float = field(default_factory=time.time)
@@ -52,6 +53,7 @@ class Participant:
             "id": self.client_id,
             "name": self.name,
             "isHost": self.client_id == host_id,
+            "relayCapable": self.relay_capable,
         }
 
 
@@ -89,18 +91,19 @@ class RoomStore:
     def _new_client_id() -> str:
         return secrets.token_urlsafe(24)
 
-    def create(self, name: str) -> tuple[Room, Participant]:
+    def create(self, name: str, relay_capable: bool = True) -> tuple[Room, Participant]:
         with self.lock:
+            self.cleanup()
             while True:
                 code = "".join(secrets.choice(ROOM_ALPHABET) for _ in range(6))
                 if code not in self.rooms:
                     break
-            participant = Participant(self._new_client_id(), name)
+            participant = Participant(self._new_client_id(), name, relay_capable)
             room = Room(code, participant.client_id, {participant.client_id: participant})
             self.rooms[code] = room
             return room, participant
 
-    def join(self, code: str, name: str) -> tuple[Room, Participant]:
+    def join(self, code: str, name: str, relay_capable: bool = True) -> tuple[Room, Participant]:
         with self.lock:
             self.cleanup()
             room = self.rooms.get(code.upper())
@@ -108,13 +111,14 @@ class RoomStore:
                 raise LookupError("房间不存在或已经结束")
             if len(room.participants) >= MAX_PARTICIPANTS:
                 raise ValueError("房间人数已满")
-            participant = Participant(self._new_client_id(), name)
+            participant = Participant(self._new_client_id(), name, relay_capable)
             room.participants[participant.client_id] = participant
             room.publish("participant-joined", participant.public(room.host_id))
             return room, participant
 
     def authenticate(self, code: str, client_id: str, session_token: str) -> tuple[Room, Participant]:
         with self.lock:
+            self.cleanup()
             room = self.rooms.get(code.upper())
             participant = room.participants.get(client_id) if room else None
             if (
@@ -138,6 +142,10 @@ class RoomStore:
                 self.rooms.pop(room.code, None)
 
     def cleanup(self) -> None:
+        with self.lock:
+            self._cleanup_locked()
+
+    def _cleanup_locked(self) -> None:
         now = time.time()
         expired_rooms: list[str] = []
         for code, room in list(self.rooms.items()):
@@ -167,6 +175,13 @@ STORE = RoomStore()
 class LiveHandler(BaseHTTPRequestHandler):
     server_version = "Syncast/1.1"
 
+    def handle(self) -> None:
+        try:
+            super().handle()
+        except (BrokenPipeError, ConnectionResetError, ssl.SSLEOFError):
+            # A tab may leave or abort its long poll before the reply arrives.
+            self.close_connection = True
+
     def log_message(self, fmt: str, *args) -> None:
         print(f"[{self.log_date_time_string()}] {fmt % args}")
 
@@ -194,6 +209,10 @@ class LiveHandler(BaseHTTPRequestHandler):
         if not name:
             raise ValueError("请输入昵称")
         return name[:24]
+
+    @staticmethod
+    def relay_capable(value: object) -> bool:
+        return value is not False
 
     def room_response(self, room: Room, participant: Participant) -> dict:
         return {
@@ -237,12 +256,19 @@ class LiveHandler(BaseHTTPRequestHandler):
         try:
             payload = self.read_json()
             if parsed.path == "/api/rooms":
-                room, participant = STORE.create(self.clean_name(payload.get("name")))
+                room, participant = STORE.create(
+                    self.clean_name(payload.get("name")),
+                    self.relay_capable(payload.get("relayCapable")),
+                )
                 self.send_json(self.room_response(room, participant), HTTPStatus.CREATED)
                 return
             parts = parsed.path.strip("/").split("/")
             if len(parts) == 4 and parts[:2] == ["api", "rooms"] and parts[3] == "join":
-                room, participant = STORE.join(parts[2], self.clean_name(payload.get("name")))
+                room, participant = STORE.join(
+                    parts[2],
+                    self.clean_name(payload.get("name")),
+                    self.relay_capable(payload.get("relayCapable")),
+                )
                 self.send_json(self.room_response(room, participant))
                 return
             if len(parts) == 4 and parts[:2] == ["api", "rooms"] and parts[3] == "signal":

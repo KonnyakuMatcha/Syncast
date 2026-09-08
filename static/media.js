@@ -36,8 +36,13 @@
     return { type: description.type, sdp };
   }
 
-  function isIsolatedAudioSafe(displaySurface) {
-    return displaySurface === "browser" || displaySurface === "window";
+  function getWindowAudioPreference(mode) {
+    return mode === "system" ? "system" : "window";
+  }
+
+  function isIsolatedAudioSafe(displaySurface, windowAudioMode = "isolated") {
+    return displaySurface === "browser"
+      || (displaySurface === "window" && windowAudioMode === "isolated");
   }
 
   function isRelayCandidate(candidate) {
@@ -56,6 +61,7 @@
   const api = {
     SYSTEM_AUDIO_BITRATE,
     enhanceSystemAudio,
+    getWindowAudioPreference,
     isIsolatedAudioSafe,
     isRelayCandidate,
     stripRelayCandidates,
