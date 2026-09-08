@@ -99,4 +99,20 @@ assert.equal(updateAutoRelay(auto, { ...pressure, pressured: false }).enabled, t
 assert.equal(updateAutoRelay(auto, { ...pressure, sharing: false }).enabled, false);
 assert.equal(updateAutoRelay(auto, { ...pressure, viewers: 3 }).enabled, false);
 
+
+const health = {
+  a: { cpuLimited: true, links: { host: { connected: true, rtt: 5 } } },
+  b: { links: { host: { connected: true, rtt: 20 }, d: { connected: true, rtt: 10 } } },
+  c: { links: { host: { connected: true, rtt: 30 }, d: { connected: false } } },
+  d: { links: { host: { connected: true, rtt: 40 }, b: { connected: true, rtt: 10 } } },
+};
+const scored = planTopology(['host', 'a', 'b', 'c', 'd'], 'host', { enabled: true, health });
+assert.ok(!scored.host.childIds.includes('a'), 'Prefer a relay without encoding pressure');
+const reachable = planTopology(['host', 'a', 'b', 'c', 'd'], 'host', {
+  enabled: true, relayIds: ['host', 'b', 'c'], health, maxChildren: 2,
+});
+assert.equal(reachable.d.parentId, 'b', 'Prefer an already connected relay over a known failed link');
+const retained = planTopology(members, 'host', { enabled: true, health, previousPlan: tree });
+for (const id of members) assert.equal(retained[id].parentId, tree[id].parentId, 'New scores must not churn healthy branches');
+
 console.log("topology planner tests passed");

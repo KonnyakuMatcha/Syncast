@@ -30,6 +30,19 @@
     const maxChildren = Math.max(1, Number(options.maxChildren) || DEFAULT_MAX_CHILDREN);
     const maxDepth = Math.max(1, Number(options.maxDepth) || DEFAULT_MAX_DEPTH);
     const relayIds = new Set(options.relayIds || orderedIds);
+    const health = options.health || {};
+    const healthFor = (id) => health instanceof Map ? health.get(id) : health[id];
+    const edgeCost = (parent, child) => {
+      const links = [healthFor(parent)?.links?.[child], healthFor(child)?.links?.[parent]].filter(Boolean);
+      const connected = links.some((link) => link.connected);
+      const rtts = links.filter((link) => link.connected && Number.isFinite(link.rtt)).map((link) => link.rtt);
+      return (connected ? 0 : links.length ? 3000 : 300) + (rtts.length ? Math.min(500, Math.max(...rtts)) : 100);
+    };
+    const relayScore = (id) => {
+      const report = healthFor(id);
+      const reachable = Object.values(report?.links || {}).filter((link) => link.connected).length;
+      return (report?.cpuLimited ? 10000 : 0) + edgeCost(hostId, id) - reachable * 50;
+    };
     const blockedEdges = options.blockedEdges;
     const blockedParentsFor = (id) => new Set(
       blockedEdges instanceof Map ? blockedEdges.get(id) : blockedEdges?.[id],
@@ -54,6 +67,7 @@
       .filter((id) => relayIds.has(id))
       .sort((left, right) => (
         Number(blockedParentsFor(left).has(hostId)) - Number(blockedParentsFor(right).has(hostId))
+        || relayScore(left) - relayScore(right)
       ));
     const leafGuests = guests.filter((id) => !relayGuests.includes(id));
     const attached = new Set([hostId]);
@@ -82,10 +96,13 @@
       if (attached.has(id)) continue;
       const parents = [...attached].filter(canParent);
       const available = parents.filter((parentId) => !blockedParentsFor(id).has(parentId));
-      const candidates = available.length ? available : parents;
-      // Short paths first, then spread new viewers over available relays.
-      candidates.sort((a, b) => plan[a].depth - plan[b].depth
-        || plan[a].childIds.length - plan[b].childIds.length);
+      const pool = available.length ? available : parents;
+      const rested = pool.filter((parentId) => parentId === hostId || !healthFor(parentId)?.cpuLimited);
+      const candidates = rested.length ? rested : pool;
+      // Existing healthy branches remain intact. For a new edge, known
+      // reachability and RTT supplement hop count and current relay load.
+      candidates.sort((a, b) => (edgeCost(a, id) + plan[a].depth * 100 + plan[a].childIds.length * 30)
+        - (edgeCost(b, id) + plan[b].depth * 100 + plan[b].childIds.length * 30));
       attach(id, candidates[0] || hostId);
     }
 

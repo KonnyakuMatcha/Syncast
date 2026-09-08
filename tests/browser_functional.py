@@ -134,6 +134,117 @@ class BrowserFunctionalTests(unittest.TestCase):
             && stats.some(s => s.type === 'inbound-rtp' && s.kind === 'audio' && s.bytesReceived > before.audio);
         }""", arg=baseline)
 
+    def freeze_receiving(self, sender, receiver, channel, kinds=('video', 'audio')):
+        for page in [sender, receiver]:
+            page.evaluate('clearInterval(state.healthTimer)')
+        receiver.evaluate("""async ({channel, kinds}) => {
+          const peer = channel === 'stage' ? state.stagePeers.get(state.stageParentId)
+            : [...state.voicePeers.values()][0];
+          window.testFrozenPeer = peer;
+          window.testOriginalStats = peer.pc.getStats.bind(peer.pc);
+          const frozen = await window.testOriginalStats();
+          peer.pc.getStats = async () => new Map([...(await window.testOriginalStats())]
+            .map(([id, report]) => [id, report.type === 'inbound-rtp' && kinds.includes(report.kind) ? frozen.get(id) || report : report]));
+          peer.progress = undefined;
+          window.testHealthTime = Date.now();
+        }""", {'channel': channel, 'kinds': list(kinds)})
+        sender_id = sender.evaluate('state.clientId')
+        receiver_id = receiver.evaluate('state.clientId')
+        previous = -1
+        for step in range(6):
+            self.wait_async(sender, """async ({id, channel, previous}) => {
+              const peer = (channel === 'stage' ? state.stagePeers : state.voicePeers).get(id);
+              const sample = SyncastHealth.summarizeStats(await peer.pc.getStats());
+              return (channel === 'stage' ? sample.sentVideoFrames : sample.sentAudioBytes) > previous;
+            }""", arg={'id': receiver_id, 'channel': channel, 'previous': previous})
+            sender.evaluate('monitorConnections()')
+            report = sender.evaluate('state.peerHealth.get(state.clientId)')
+            previous = report['stage' if channel == 'stage' else 'links'][receiver_id][
+                'videoFrames' if channel == 'stage' else 'audioBytes']
+            receiver.wait_for_function('({id, serial}) => state.peerHealth.get(id)?.serial === serial',
+                                       arg={'id': sender_id, 'serial': report['serial']})
+            receiver.evaluate('step => monitorConnections(window.testHealthTime + step * 5000)', step)
+
+    def test_connected_stage_stall_rebuilds_without_touching_voice(self):
+        host = self.page('Host')
+        guest = self.page('Guest', host.locator('#room-code-label').inner_text())
+        host.locator('#share-button').click()
+        self.assert_receiving(guest)
+        guest.evaluate('window.testVoicePC = state.voicePeers.get(state.hostId).pc')
+        before = host.evaluate("[...state.stagePeers.values()][0].pc.localDescription.sdp.match(/a=ice-ufrag:(.*)/)[1]")
+        self.freeze_receiving(host, guest, 'stage')
+        self.assertTrue(guest.evaluate('peerTransportConnected(window.testFrozenPeer)'))
+        self.assertIn('停滞', guest.locator('#stage-connection-status').inner_text())
+        self.assertEqual(guest.locator('#signal-status').inner_text(), '已连接')
+        host.wait_for_function("old => [...state.stagePeers.values()][0].pc.localDescription.sdp.match(/a=ice-ufrag:(.*)/)[1] !== old", arg=before)
+        guest.wait_for_function('state.stagePeers.get(state.stageParentId) !== window.testFrozenPeer', timeout=20000)
+        self.assert_receiving(guest)
+        guest.evaluate('monitorConnections()')
+        guest.wait_for_function("document.querySelector('#stage-connection-status').textContent === '播放中'")
+        self.assertTrue(guest.evaluate('state.voicePeers.get(state.hostId).pc === window.testVoicePC'))
+        self.assertEqual(guest.evaluate('state.stagePeers.get(state.stageParentId).recoveryAttempts'), 0)
+
+    def test_stage_audio_rebuild_keeps_budget_until_audio_returns(self):
+        host = self.page('Host')
+        guest = self.page('Guest', host.locator('#room-code-label').inner_text())
+        host.locator('#share-button').click()
+        self.assert_receiving(guest)
+        guest.evaluate("""() => {
+          const prototype = RTCPeerConnection.prototype;
+          window.testPrototypeStats = prototype.getStats;
+          const voicePC = state.voicePeers.get(state.hostId).pc;
+          prototype.getStats = async function (...args) {
+            const stats = await window.testPrototypeStats.apply(this, args);
+            if (this === voicePC) return stats;
+            return new Map([...stats].map(([id, report]) => [id,
+              report.type === 'inbound-rtp' && report.kind === 'audio'
+                ? {...report, bytesReceived: 0} : report]));
+          };
+        }""")
+        self.freeze_receiving(host, guest, 'stage', kinds=('audio',))
+        self.assertIn('声音停滞', guest.locator('#stage-connection-status').inner_text())
+        guest.wait_for_function('state.stagePeers.get(state.stageParentId) !== window.testFrozenPeer', timeout=20000)
+        self.wait_async(guest, """async () => {
+          const peer = state.stagePeers.get(state.stageParentId);
+          return peer && SyncastHealth.summarizeStats(await peer.pc.getStats()).videoFrames > 5;
+        }""")
+        guest.evaluate('monitorConnections()')
+        self.assertTrue(guest.evaluate('state.stagePeers.get(state.stageParentId).recoveryAudioNeeded'))
+        self.assertGreaterEqual(guest.evaluate('state.stagePeers.get(state.stageParentId).recoveryAttempts'), 2)
+        guest.evaluate('() => { RTCPeerConnection.prototype.getStats = window.testPrototypeStats; }')
+        self.assert_receiving(guest)
+        guest.evaluate('monitorConnections()')
+        self.assertEqual(guest.evaluate('state.stagePeers.get(state.stageParentId).recoveryAttempts'), 0)
+        self.assertEqual(guest.locator('#stage-connection-status').inner_text(), '播放中')
+
+    def test_voice_stall_manual_reconnect_preserves_live_stream(self):
+        host = self.page('Host')
+        guest = self.page('Guest', host.locator('#room-code-label').inner_text())
+        host.locator('#share-button').click()
+        self.assert_receiving(guest)
+        guest.evaluate('window.testStagePC = state.stagePeers.get(state.stageParentId).pc; window.testClientId = state.clientId')
+        self.freeze_receiving(host, guest, 'voice')
+        self.assertIn('语音 · Host：声音停滞', guest.locator('#connection-details').inner_text())
+        self.assertEqual(guest.locator('#stage-connection-status').inner_text(), '播放中')
+        guest.evaluate("""() => {
+          const peer = window.testFrozenPeer;
+          clearTimeout(peer.recoveryTimer);
+          peer.recoveryTimer = null;
+          peer.recoveryExhausted = true;
+          peer.recoveryAttempts = 3;
+          peer.pc.getStats = window.testOriginalStats;
+          renderConnectionStatus();
+        }""")
+        guest.locator('#reconnect-button').click()
+        self.assertFalse(guest.evaluate('window.testFrozenPeer.recoveryExhausted'))
+        self.wait_async(guest, """async () => {
+          await monitorConnections();
+          return !window.testFrozenPeer.mediaStalled;
+        }""")
+        self.assertEqual(guest.locator('#voice-status').inner_text(), '已连接 1/1')
+        self.assertTrue(guest.evaluate('state.clientId === window.testClientId && state.stagePeers.get(state.stageParentId).pc === window.testStagePC'))
+        self.assert_receiving(guest)
+
     def test_failed_join_releases_microphone(self):
         context = self.browser.new_context(permissions=['microphone'])
         self.contexts.append(context)
@@ -179,7 +290,7 @@ class BrowserFunctionalTests(unittest.TestCase):
             with self.subTest(width=width):
                 host.set_viewport_size({'width': width, 'height': 844})
                 self.assertLessEqual(host.evaluate('document.documentElement.scrollWidth'), width)
-                for selector in ['#mic-button', '#sound-button', '#share-button', '#leave-button']:
+                for selector in ['#mic-button', '#sound-button', '#share-button', '#leave-button', '#reconnect-button', '.connection-panel']:
                     box = host.locator(selector).bounding_box()
                     self.assertGreaterEqual(box['x'], 0)
                     self.assertLessEqual(box['x'] + box['width'], width)
@@ -258,6 +369,26 @@ class BrowserFunctionalTests(unittest.TestCase):
         host.locator('#share-button').click()
         for guest in guests:
             self.assert_receiving(guest)
+        pressured_id = guests[0].evaluate('state.clientId')
+        guests[0].evaluate('clearInterval(state.healthTimer)')
+        guests[0].wait_for_function('!state.healthBusy')
+        def report_pressure():
+            serial = guests[0].evaluate("""async () => {
+              const report = {serial: ++state.healthSerial, cpuLimited: true, links: {}, stage: {}};
+              await sendSignal(state.hostId, {channel: 'peer-health', report});
+              return report.serial;
+            }""")
+            host.wait_for_function('({id, serial}) => state.peerHealth.get(id)?.serial === serial',
+                                   arg={'id': pressured_id, 'serial': serial})
+        report_pressure()
+        report_pressure()
+        self.assertTrue(host.evaluate('id => freshPeerHealth().get(id).cpuLimited', pressured_id))
+        host.evaluate('id => state.peerHealth.get(id).receivedAt -= 21000', pressured_id)
+        self.assertFalse(host.evaluate('id => freshPeerHealth().has(id)', pressured_id))
+        report_pressure()
+        self.assertFalse(host.evaluate('id => freshPeerHealth().get(id).cpuLimited', pressured_id),
+                         'An expired report must not count toward sustained encoding pressure')
+        report_pressure()
         host.evaluate("""() => {
           clearInterval(state.topologyMonitorTimer);
           for (const peer of state.stagePeers.values()) {
@@ -274,11 +405,15 @@ class BrowserFunctionalTests(unittest.TestCase):
             host.evaluate('monitorTopology()')
             self.assertFalse(host.evaluate('state.topologyEnabled'))
         host.evaluate('monitorTopology()')
-        guests[3].wait_for_function('() => state.stageParentId !== state.hostId')
-        self.assert_receiving(guests[3])
+        host.wait_for_function('() => [...state.topologyNodes.values()].some(node => node.depth === 2)')
+        leaf_id = host.evaluate('() => [...state.topologyNodes].find(([, node]) => node.depth === 2)[0]')
+        self.assertEqual(leaf_id, pressured_id, 'Avoid assigning relay work to the CPU-limited participant')
+        leaf = next(page for page in guests if page.evaluate('state.clientId') == leaf_id)
+        leaf.wait_for_function('() => state.stageParentId !== state.hostId')
+        self.assert_receiving(leaf)
         host.locator('#topology-mode').select_option('direct')
-        guests[3].wait_for_function('() => state.stageParentId === state.hostId')
-        self.assert_receiving(guests[3])
+        leaf.wait_for_function('() => state.stageParentId === state.hostId')
+        self.assert_receiving(leaf)
         host.evaluate('monitorTopology()')
         self.assertFalse(host.evaluate('state.topologyEnabled'), 'Manual direct mode must override the monitor')
 
@@ -302,9 +437,9 @@ class BrowserFunctionalTests(unittest.TestCase):
           .filter(([peerId]) => peerId !== id)
           .map(([, peer]) => peer.pc.getSenders().find(s => s.track?.kind === 'video')
             .getParameters().encodings[0].maxBitrate)""", guest_id), [20000000] * 3)
-        leaf = guests[3]
-        leaf.evaluate("window.testOldStream = state.stageStream; window.testOldParent = state.stageParentId")
-        guests[0].evaluate("""() => {
+        for guest in guests:
+            guest.evaluate("window.testOldStream = state.stageStream; window.testOldParent = state.stageParentId")
+            guest.evaluate("""() => {
           const send = sendSignal;
           sendSignal = async (id, data) => {
             if (data.channel === 'stage' && data.description?.type === 'offer' && !window.testReleased) {
@@ -315,15 +450,22 @@ class BrowserFunctionalTests(unittest.TestCase):
           };
         }""")
         host.locator('#topology-mode').select_option('relay')
-        host.wait_for_function('() => state.topologyEnabled')
+        host.wait_for_function('() => state.topologyEnabled && [...state.topologyNodes.values()].some(node => node.depth === 2)')
+        leaf_id, relay_id = host.evaluate('() => { const [id, node] = [...state.topologyNodes].find(([, node]) => node.depth === 2); return [id, node.parentId]; }')
+        by_id = {page.evaluate('state.clientId'): page for page in guests}
+        leaf, relay = by_id[leaf_id], by_id[relay_id]
+        unaffected = [page for page in guests if page not in [leaf, relay]]
+        remaining = [page for page in guests if page != relay]
         leaf.wait_for_function('() => state.stageParentId !== state.hostId')
-        guests[0].wait_for_function('() => window.testOfferHeld')
+        relay.wait_for_function('() => window.testOfferHeld')
         self.assertTrue(leaf.evaluate('elements.stageVideo.srcObject === window.testOldStream'))
         baseline = leaf.evaluate("""async () => [...(await state.stagePeers.get(window.testOldParent).pc.getStats()).values()]
           .find(s => s.type === 'inbound-rtp' && s.kind === 'video').framesDecoded""")
         self.wait_async(leaf, """async before => [...(await state.stagePeers.get(window.testOldParent).pc.getStats()).values()]
           .some(s => s.type === 'inbound-rtp' && s.kind === 'video' && s.framesDecoded > before + 2)""", arg=baseline)
-        guests[0].evaluate('window.testRelease()')
+        relay.evaluate('window.testRelease()')
+        for guest in guests:
+            guest.evaluate('window.testReleased = true')
         self.assert_receiving(leaf)
         leaf.wait_for_function('() => !state.stagePeers.has(window.testOldParent)')
         for page in pages:
@@ -339,20 +481,20 @@ class BrowserFunctionalTests(unittest.TestCase):
             self.assert_receiving(guest)
         self.assertTrue(leaf.locator('#stage-video').evaluate('(v) => v.muted'),
                         'Restarting the share unexpectedly unmutes the viewer')
-        for guest in guests[1:3]:
+        for guest in unaffected:
             guest.evaluate('window.testStablePeer = state.stagePeers.get(state.stageParentId).pc; window.testVoicePeer = state.voicePeers.get(state.hostId).pc')
-        guests[0].locator('#leave-button').click()
+        relay.locator('#leave-button').click()
         leaf.wait_for_function('() => state.stageParentId === state.hostId')
         self.assert_receiving(leaf)
-        for guest in guests[1:3]:
+        for guest in unaffected:
             self.assertTrue(guest.evaluate('state.stagePeers.get(state.stageParentId).pc === window.testStablePeer'))
             self.assertTrue(guest.evaluate('state.voicePeers.get(state.hostId).pc === window.testVoicePeer'))
         host.locator('#topology-mode').select_option('direct')
-        for guest in guests[1:]:
+        for guest in remaining:
             guest.wait_for_function('() => !state.topologyEnabled')
             self.assert_receiving(guest)
         host.locator('#leave-button').click()
-        for guest in guests[1:]:
+        for guest in remaining:
             guest.locator('#lobby').wait_for(state='visible')
 
 

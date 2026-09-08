@@ -179,10 +179,15 @@ input::placeholder { color: #59625c; }
 .topology-node.self .topology-node-row { border-color: #477255; background: #1c3325; }
 .topology-node.self .topology-node-tag { color: #a8ecb9; font-weight: 700; }
 .topology-hint { display: block; margin-top: 9px; color: #758078; font-size: 9px; }
-.channel-status { margin: 10px; padding: 12px; display: flex; align-items: center; gap: 10px; border: 1px solid #2d3931; background: #18231b; }
-.channel-status strong { display: block; font-size: 11px; }
-.channel-status small { display: block; margin-top: 3px; color: #758078; font-size: 9px; }
-.channel-pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 4px rgba(111,228,154,.09); }
+.connection-panel { flex: 0 0 auto; margin: 0 10px 10px; padding: 10px 12px; border: 1px solid #2d3931; background: #18231b; }
+.connection-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 3px 0; font-size: 11px; }
+.connection-row > span { color: var(--muted); }
+.connection-row strong { font-weight: 500; text-align: right; }
+.connection-details { max-height: 80px; overflow-y: auto; margin: 8px 0; color: var(--amber); font-size: 10px; line-height: 1.6; overflow-wrap: anywhere; }
+.connection-details:empty { display: none; }
+.reconnect-button { width: 100%; margin-top: 8px; padding: 6px; border: 1px solid #414a43; border-radius: 4px; color: #b8c3ba; background: #202521; cursor: pointer; font-size: 11px; }
+.reconnect-button:hover { border-color: var(--green); }
+.reconnect-button:disabled { opacity: .6; cursor: wait; }
 
 .controlbar { position: relative; display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; padding: 0 22px; border-top: 1px solid var(--line); background: #121512; }
 .session-info { display: flex; flex-direction: column; gap: 4px; }
@@ -223,7 +228,6 @@ input::placeholder { color: #59625c; }
   .sidebar-heading { height: 55px; }
   .participant-list { display: flex; flex-wrap: wrap; align-content: flex-start; }
   .participant { width: 50%; }
-  .channel-status { display: none; }
   .controlbar { grid-template-columns: 1fr; padding: 0 8px; }
   .session-info, .media-note { display: none; }
   .controls { justify-content: center; gap: 5px; }

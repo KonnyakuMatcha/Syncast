@@ -89,10 +89,13 @@
           <div id="topology-map" class="topology-map"></div>
           <small class="topology-hint">语音仍为成员间 mesh 直连</small>
         </section>
-        <div class="channel-status">
-          <span class="channel-pulse"></span>
-          <div><strong id="voice-status">语音已连接</strong><small>WebRTC 加密传输</small></div>
-        </div>
+        <section class="connection-panel" aria-label="连接状态">
+          <div class="connection-row"><span>房间</span><strong id="signal-status">正在连接</strong></div>
+          <div class="connection-row"><span>直播</span><strong id="stage-connection-status">等待共享</strong></div>
+          <div class="connection-row"><span>语音</span><strong id="voice-status">正在连接</strong></div>
+          <p id="connection-details" class="connection-details" role="status"></p>
+          <button id="reconnect-button" class="reconnect-button" type="button">重新连接</button>
+        </section>
       </aside>
     </div>
 
@@ -139,6 +142,8 @@
   <div id="remote-audio" hidden></div>
   <script src="topology.js"></script>
   <script src="media.js"></script>
+  <script src="health.js"></script>
+  <script src="connections.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
