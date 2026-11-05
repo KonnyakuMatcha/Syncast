@@ -111,6 +111,7 @@ function renderConnectionStatus() {
     : stageProblems.length ? (state.isHost ? `部分连接异常 ${stageProblems.length}` : peerProblem(incoming))
     : state.isHost ? (stageIds.length ? `发送中 · ${stageIds.length} 路` : "等待观众")
     : elements.stageVideo.paused ? "等待播放" : "播放中";
+  if (state.stageTransport === "server") elements.stageConnectionStatus.textContent = serverBroadcastStatus();
   const name = (id) => state.participants.get(id)?.name || "成员";
   const details = [];
   for (const id of voiceProblems) details.push(`语音 · ${name(id)}：${peerProblem(state.voicePeers.get(id))}`);
@@ -125,6 +126,10 @@ async function reconnectMedia() {
   state.reconnecting = true;
   renderConnectionStatus();
   try {
+    if (state.stageTransport === "server") {
+      closeServerBroadcast();
+      updateServerBroadcast();
+    }
     for (const audio of elements.remoteAudio.querySelectorAll("audio")) audio.play().catch(() => {});
     if (elements.stageVideo.srcObject) elements.stageVideo.play().catch(() => {});
     const all = [
@@ -145,7 +150,7 @@ async function reconnectMedia() {
     for (const id of state.participants.keys()) {
       if (id !== state.clientId && !state.voicePeers.has(id)) await offerVoice(id);
     }
-    if (!state.isHost && state.stageExpected && !state.stagePeers.has(state.stageParentId)) {
+    if (state.stageTransport !== "server" && !state.isHost && state.stageExpected && !state.stagePeers.has(state.stageParentId)) {
       await sendSignal(state.stageParentId, { channel: "stage-rebuild", version: state.topologyVersion });
     }
   } finally {

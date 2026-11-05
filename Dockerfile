@@ -5,7 +5,7 @@ RUN apk add --no-cache openssl \
     && adduser -S -G syncast syncast
 
 WORKDIR /app
-COPY --chown=syncast:syncast server.py ./
+COPY --chown=syncast:syncast server.py broadcast.py ./
 COPY --chown=syncast:syncast static ./static
 
 USER syncast

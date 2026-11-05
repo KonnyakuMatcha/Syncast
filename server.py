@@ -20,6 +20,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+import broadcast
+
 
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
@@ -62,6 +64,7 @@ class Room:
     code: str
     host_id: str
     participants: dict[str, Participant]
+    broadcast_used: bool = False
     created_at: float = field(default_factory=time.time)
     next_sequence: int = 1
     events: list[dict] = field(default_factory=list)
@@ -136,6 +139,7 @@ class RoomStore:
             room, _ = self.authenticate(code, client_id, session_token)
             was_host = client_id == room.host_id
             participant = room.participants.pop(client_id)
+            broadcast.schedule_cleanup(room, None if was_host else client_id)
             room.publish("participant-left", {"id": client_id, "name": participant.name})
             if was_host:
                 room.publish("room-closed", {})
@@ -162,10 +166,12 @@ class RoomStore:
                 continue
             for client_id in stale:
                 participant = room.participants.pop(client_id)
+                broadcast.schedule_cleanup(room, client_id)
                 room.publish("participant-left", {"id": client_id, "name": participant.name})
         for code in expired_rooms:
             room = self.rooms.pop(code, None)
             if room:
+                broadcast.schedule_cleanup(room)
                 room.publish("room-closed", {})
 
 
@@ -224,6 +230,7 @@ class LiveHandler(BaseHTTPRequestHandler):
             "sequence": room.next_sequence - 1,
             "iceServers": build_ice_servers(),
             "iceRefreshSeconds": 0,
+            "broadcastAvailable": broadcast.available(),
             "participants": [item.public(room.host_id) for item in room.participants.values()],
         }
 
@@ -237,6 +244,7 @@ class LiveHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/health":
             self.send_json({
                 "ok": True,
+                "broadcast": {"configured": broadcast.available()},
                 "ice": {
                     "stun": bool(_urls_from_env("RTC_STUN_URLS")),
                     "turn": False,
@@ -284,6 +292,15 @@ class LiveHandler(BaseHTTPRequestHandler):
                     recipient,
                 )
                 self.send_json({"ok": True})
+                return
+            if len(parts) == 4 and parts[:2] == ["api", "rooms"] and parts[3] == "broadcast-token":
+                with STORE.lock:
+                    room, participant = STORE.authenticate(
+                        parts[2], str(payload.get("clientId", "")), self.bearer_token()
+                    )
+                    credentials = broadcast.join_credentials(room, participant)
+                    room.broadcast_used = True
+                self.send_json(credentials)
                 return
             if len(parts) == 4 and parts[:2] == ["api", "rooms"] and parts[3] == "heartbeat":
                 STORE.authenticate(
@@ -416,6 +433,7 @@ def main() -> None:
     parser.add_argument("--port", default=8443, type=int)
     parser.add_argument("--http", action="store_true", help="Disable TLS (localhost testing only)")
     args = parser.parse_args()
+    broadcast.configuration()  # Fail early on an explicitly enabled but invalid configuration.
     server = ThreadingHTTPServer((args.host, args.port), LiveHandler)
     scheme = "http"
     if not args.http:
@@ -425,12 +443,20 @@ def main() -> None:
         server.socket = context.wrap_socket(server.socket, server_side=True)
         scheme = "https"
     print(f"Syncast is running at {scheme}://{args.host}:{args.port}")
-    print("Screen and microphone media stay between participants; only signaling reaches this server.")
+    print("Optional server broadcasting is " + ("enabled (LiveKit)." if broadcast.available() else "disabled; media uses P2P."))
+    stopping = threading.Event()
+
+    def cleanup_rooms():
+        while not stopping.wait(10):
+            STORE.cleanup()
+
+    threading.Thread(target=cleanup_rooms, daemon=True, name="room-cleanup").start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nStopping server.")
     finally:
+        stopping.set()
         server.server_close()
 
 

@@ -77,6 +77,9 @@ const state = {
   memberStates: new Map(),
   voicePeers: new Map(),
   stagePeers: new Map(),
+  broadcastAvailable: false,
+  broadcastClient: null,
+  stageTransport: "p2p",
   stageQualities: new Map(),
   stageStream: null,
   stageParentId: "",
@@ -201,6 +204,12 @@ function startSession(session, name) {
   state.sequence = session.sequence;
   state.iceServers = Array.isArray(session.iceServers) ? session.iceServers : [];
   state.iceRefreshSeconds = Number(session.iceRefreshSeconds) || 0;
+  state.broadcastAvailable = Boolean(session.broadcastAvailable);
+  if (!state.broadcastAvailable && state.topologyMode === "server") state.topologyMode = "auto";
+  state.stageTransport = state.isHost && state.topologyMode === "server" ? "server" : "p2p";
+  const serverOption = elements.topologyMode.querySelector('[value="server"]');
+  serverOption.disabled = !state.broadcastAvailable;
+  serverOption.textContent = state.broadcastAvailable ? "服务器广播" : "服务器广播（未启用）";
   state.running = true;
   state.stageParentId = state.isHost ? "" : state.hostId;
   state.stageChildIds.clear();
@@ -337,6 +346,14 @@ function renderParticipants() {
 }
 
 function topologyNodesForRender() {
+  if (state.stageTransport === "server") {
+    const guests = [...state.participants.keys()].filter((id) => id !== state.hostId);
+    return new Map([
+      [state.hostId, { id: state.hostId, childIds: ["server"], depth: 0 }],
+      ["server", { id: "server", parentId: state.hostId, childIds: guests, depth: 1 }],
+      ...guests.map((id) => [id, { id, parentId: "server", childIds: [], depth: 2 }]),
+    ]);
+  }
   if (state.isHost) {
     return new Map(Object.entries(currentTopologyPlan())
       .map(([id, node]) => [id, { ...node, id }]));
@@ -360,7 +377,7 @@ function topologyNodesForRender() {
 }
 
 function topologyNodeElement(node, nodes, level) {
-  const participant = state.participants.get(node.id);
+  const participant = node.id === "server" ? { name: "广播服务器" } : state.participants.get(node.id);
   const item = document.createElement("li");
   const childIds = Array.isArray(node.childIds)
     ? node.childIds.filter((childId) => nodes.has(childId))
@@ -418,7 +435,7 @@ function renderTopology() {
   list.ariaLabel = "屏幕转发拓扑";
   list.append(topologyNodeElement(rootNode, nodes, 0));
   elements.topologyMap.replaceChildren(list);
-  elements.topologyState.textContent = state.topologyEnabled ? "树状" : "星型";
+  elements.topologyState.textContent = state.stageTransport === "server" ? "服务器广播" : (state.topologyEnabled ? "树状" : "星型");
   elements.topologyState.classList.toggle("tree", state.topologyEnabled);
 }
 
@@ -459,14 +476,16 @@ function publishStageTopology() {
 async function publishStageTopologyNow() {
   if (!state.isHost || !state.running) return;
   const enabled = state.topologyEnabled;
+  const transport = state.topologyMode === "server" ? "server" : "p2p";
   const plan = currentTopologyPlan();
   const version = ++state.topologyVersion;
   const source = { live: Boolean(state.display), hasAudio: Boolean(state.display?.getAudioTracks().length), audioEnabled: state.sharedSoundEnabled };
-  await applyStageTopology({ version, enabled, source, nodes: plan, ...plan[state.clientId] });
+  await applyStageTopology({ version, enabled, transport, source, nodes: plan, ...plan[state.clientId] });
   await Promise.all([...state.participants.keys()]
     .filter((id) => id !== state.clientId)
     .map((id) => sendSignal(id, {
       channel: "stage-topology",
+      transport,
       version,
       enabled,
       source,
@@ -485,6 +504,24 @@ async function applyStageTopology(assignment) {
     state.stageExpected = Boolean(assignment.source.live);
     state.stageHasAudio = Boolean(assignment.source.hasAudio);
     state.stageAudioEnabled = Boolean(assignment.source.audioEnabled);
+  }
+  const oldTransport = state.stageTransport;
+  state.stageTransport = assignment.transport === "server" ? "server" : "p2p";
+  if (state.stageTransport === "server") {
+    state.stageParentId = "";
+    state.stageChildIds.clear();
+    state.stageSubscriptions.clear();
+    for (const id of [...state.stagePeers.keys()]) closeStagePeer(id);
+    if (oldTransport !== "server" && !state.isHost) showStage(false);
+    updateServerBroadcast();
+    renderParticipants();
+    updateMediaControls();
+    return;
+  }
+  if (oldTransport === "server") {
+    closeServerBroadcast();
+    state.stageStream = state.isHost ? state.display : null;
+    if (!state.isHost) showStage(false);
   }
   const oldParentId = state.stageParentId;
   const nodes = assignment.nodes;
@@ -539,6 +576,10 @@ async function applyStageTopology(assignment) {
 }
 
 function updateMediaControls() {
+  elements.qualitySelect.disabled = state.stageTransport === "server";
+  elements.qualitySelect.title = state.stageTransport === "server" ? "服务器广播使用房主统一画质" : "";
+  elements.qualityControl.querySelector("span").textContent = state.stageTransport === "server" ? "统一画质" : "观看画质";
+  elements.qualitySelect.value = state.stageTransport === "server" ? "high" : state.preferredQuality;
   const hostHasSilentShare = state.isHost && state.display && !state.display.getAudioTracks().length;
   elements.mic.classList.toggle("off", state.microphoneMuted || !state.microphone);
   elements.mic.querySelector(".control-label").textContent = state.microphoneMuted || !state.microphone ? "麦克风关闭" : "麦克风";
@@ -761,6 +802,7 @@ async function offerVoice(peerId) {
 }
 
 function requestStageQuality() {
+  if (state.stageTransport === "server") return;
   if (!state.isHost && state.stageParentId) {
     const quality = state.stageChildIds.size ? "high" : state.preferredQuality;
     sendSignal(state.stageParentId, { channel: "stage-quality", quality });
@@ -770,7 +812,7 @@ function requestStageQuality() {
 async function updateDisplayFrameRate() {
   const track = state.display?.getVideoTracks()[0];
   if (!track) return;
-  const needsHighFrameRate = [...state.stageQualities.values()].some((quality) => quality === "high");
+  const needsHighFrameRate = state.stageTransport === "server" || [...state.stageQualities.values()].some((quality) => quality === "high");
   const frameRate = needsHighFrameRate ? 60 : 30;
   track.contentHint = needsHighFrameRate ? "motion" : "detail";
   try {
@@ -1050,6 +1092,7 @@ async function handleSignal(payload) {
   if (data.channel === "stage-stop") {
     if (peerId === state.hostId) {
       state.stageExpected = false;
+      closeServerBroadcast();
       state.stageRebuildState.clear();
       for (const stagePeerId of [...state.stagePeers.keys()]) closeStagePeer(stagePeerId);
       state.stageStream = null;
@@ -1220,6 +1263,7 @@ function stopSharing() {
   if (!state.display) return;
   const display = state.display;
   state.display = null;
+  closeServerBroadcast();
   state.stageExpected = false;
   state.stageRebuildState.clear();
   state.autoRelay = { enabled: false, pressureSamples: 0 };
@@ -1295,6 +1339,7 @@ function toggleSharedSound() {
   state.sharedSoundEnabled = !state.sharedSoundEnabled;
   if (state.isHost && state.display) {
     state.display.getAudioTracks().forEach((track) => { track.enabled = state.sharedSoundEnabled; });
+    state.broadcastClient?.setAudioEnabled(state.sharedSoundEnabled);
     state.stageAudioEnabled = state.sharedSoundEnabled;
     for (const id of state.participants.keys()) {
       if (id !== state.clientId) sendSignal(id, { channel: "stage-audio-state", enabled: state.sharedSoundEnabled });
@@ -1309,6 +1354,7 @@ function toggleSharedSound() {
 function closeRoom(message) {
   if (!state.running) return;
   state.running = false;
+  closeServerBroadcast();
   clearInterval(state.topologyMonitorTimer);
   clearInterval(state.healthTimer);
   state.display?.getTracks().forEach((track) => track.stop());
@@ -1345,7 +1391,9 @@ elements.topologyMode.addEventListener("change", async () => {
   state.blockedStageEdges.clear();
   localStorage.setItem("syncast-topology-mode", state.topologyMode);
   await publishStageTopology();
+  await updateDisplayFrameRate();
   showToast(state.topologyMode === "auto" ? "将根据房主负载自动选择连接方式"
+    : state.topologyMode === "server" ? "已切换服务器广播，房主只上传一路画面"
     : (state.topologyEnabled ? "已开启中转，节省房主上传" : "已恢复房主直连"));
 });
 elements.windowAudioSelect.addEventListener("change", () => {
@@ -1381,7 +1429,7 @@ if (Object.hasOwn(QUALITY_PROFILES, savedQuality)) state.preferredQuality = save
 const savedWindowAudioMode = localStorage.getItem("syncast-window-audio");
 if (["isolated", "system"].includes(savedWindowAudioMode)) state.windowAudioMode = savedWindowAudioMode;
 const savedTopologyMode = localStorage.getItem("syncast-topology-mode");
-if (["auto", "direct", "relay"].includes(savedTopologyMode)) state.topologyMode = savedTopologyMode;
+if (["auto", "direct", "relay", "server"].includes(savedTopologyMode)) state.topologyMode = savedTopologyMode;
 else if (localStorage.getItem("syncast-tree-topology") !== null) {
   state.topologyMode = localStorage.getItem("syncast-tree-topology") === "true" ? "relay" : "direct";
 }

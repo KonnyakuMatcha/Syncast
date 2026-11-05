@@ -1,0 +1,38 @@
+# Optional overlay: docker compose -f compose.public.yaml -f compose.broadcast.yaml up -d --build
+services:
+  syncast:
+    environment:
+      SYNCAST_BROADCAST_ENABLED: "true"
+      SYNCAST_LIVEKIT_URL: ${SYNCAST_LIVEKIT_URL:-wss://${SYNCAST_DOMAIN}/Syncast/sfu}
+      SYNCAST_LIVEKIT_API_URL: http://livekit:7880
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY:?Set LIVEKIT_API_KEY in .env}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET:?Set LIVEKIT_API_SECRET in .env}
+
+  caddy:
+    volumes:
+      - ./Caddyfile.broadcast:/etc/caddy/Caddyfile:ro
+
+  livekit:
+    image: livekit/livekit-server:v1.13.11
+    restart: unless-stopped
+    environment:
+      LIVEKIT_CONFIG: |
+        port: 7880
+        rtc:
+          tcp_port: 7881
+          udp_port: 7882
+          use_external_ip: false
+          node_ip: ${SYNCAST_PUBLIC_IP:?Set the VPS public IPv4 in SYNCAST_PUBLIC_IP}
+        keys:
+          "${LIVEKIT_API_KEY}": "${LIVEKIT_API_SECRET}"
+        room:
+          max_participants: 12
+          empty_timeout: 60
+          departure_timeout: 10
+        logging:
+          level: warn
+    ports:
+      - "7881:7881/tcp"
+      - "7882:7882/udp"
+    networks:
+      - syncast

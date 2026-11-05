@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import json
+import base64
+import hashlib
+import hmac
 import sys
 import threading
 import time
@@ -63,6 +66,61 @@ class RoomLifecycleTests(unittest.TestCase):
 
 
 class LiveServerTests(unittest.TestCase):
+    broadcast_env = {
+        "SYNCAST_BROADCAST_ENABLED": "true",
+        "SYNCAST_LIVEKIT_URL": "wss://test.example/Syncast/sfu",
+        "SYNCAST_LIVEKIT_API_URL": "http://livekit:7880",
+        "LIVEKIT_API_KEY": "testkey",
+        "LIVEKIT_API_SECRET": "0123456789abcdef0123456789abcdef",
+    }
+
+    def test_broadcast_tokens_require_session_and_limit_publishers(self):
+        with patch.dict(server.os.environ, self.broadcast_env, clear=True):
+            _, host = self.request("POST", "/api/rooms", {"name": "Host"})
+            _, guest = self.request("POST", f"/api/rooms/{host['roomCode']}/join", {"name": "Guest"})
+            self.assertTrue(host["broadcastAvailable"])
+            endpoint = f"/api/rooms/{host['roomCode']}/broadcast-token"
+            for user in [host, guest]:
+                status, _ = self.request("POST", endpoint, {"clientId": user["clientId"]})
+                self.assertEqual(status, 401)
+                status, data = self.request("POST", endpoint, {"clientId": user["clientId"]}, user["sessionToken"])
+                self.assertEqual(status, 200)
+                self.assertEqual(data["url"], self.broadcast_env["SYNCAST_LIVEKIT_URL"])
+                header, body, signature = data["token"].split(".")
+                expected = hmac.new(self.broadcast_env["LIVEKIT_API_SECRET"].encode(), f"{header}.{body}".encode(), hashlib.sha256).digest()
+                self.assertEqual(base64.urlsafe_b64decode(signature + "=="), expected)
+                claims = json.loads(base64.urlsafe_b64decode(body + "=="))
+                self.assertEqual(claims["sub"], user["clientId"])
+                self.assertEqual(claims["video"]["room"], f"syncast-{host['roomCode']}-{host['clientId']}")
+                self.assertEqual(claims["video"]["canPublish"], user["isHost"])
+                self.assertEqual(claims["video"]["canSubscribe"], not user["isHost"])
+                self.assertFalse(claims["video"]["canPublishData"])
+                self.assertNotIn("roomAdmin", claims["video"])
+                self.assertLessEqual(claims["exp"] - int(time.time()), 60)
+                self.assertNotIn(self.broadcast_env["LIVEKIT_API_SECRET"], json.dumps(data))
+                if user["isHost"]:
+                    self.assertEqual(claims["video"]["canPublishSources"], ["screen_share", "screen_share_audio"])
+            status, _ = self.request("POST", endpoint, {"clientId": host["clientId"]}, guest["sessionToken"])
+            self.assertEqual(status, 401)
+
+    def test_broadcast_disabled_by_default_and_invalid_config_rejected(self):
+        for env in [{}, {**self.broadcast_env, "LIVEKIT_API_SECRET": "short"}]:
+            with patch.dict(server.os.environ, env, clear=True):
+                _, host = self.request("POST", "/api/rooms", {"name": "Host"})
+                self.assertFalse(host["broadcastAvailable"])
+                status, _ = self.request("POST", f"/api/rooms/{host['roomCode']}/broadcast-token",
+                                         {"clientId": host["clientId"]}, host["sessionToken"])
+                self.assertEqual(status, 400)
+
+    def test_departed_members_cannot_get_new_broadcast_tokens(self):
+        with patch.dict(server.os.environ, self.broadcast_env, clear=True):
+            _, host = self.request("POST", "/api/rooms", {"name": "Host"})
+            _, guest = self.request("POST", f"/api/rooms/{host['roomCode']}/join", {"name": "Guest"})
+            self.request("DELETE", f"/api/rooms/{host['roomCode']}?clientId={guest['clientId']}", token=guest["sessionToken"])
+            status, _ = self.request("POST", f"/api/rooms/{host['roomCode']}/broadcast-token",
+                                     {"clientId": guest["clientId"]}, guest["sessionToken"])
+            self.assertEqual(status, 401)
+
     @classmethod
     def setUpClass(cls) -> None:
         server.STORE = server.RoomStore()

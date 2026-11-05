@@ -1,15 +1,15 @@
 # Syncast
 
-Syncast 是一个自托管的小型直播协作服务。公网服务器只负责网页、房间信令和 ICE 协商，屏幕、系统声音及独立麦克风轨道通过 WebRTC 在成员间直接传输，不提供服务器媒体中继。
+Syncast 是一个自托管的小型直播协作服务。默认通过 WebRTC 在成员间传输媒体；也可在 VPS 上启用 LiveKit SFU，让房主只上传一份画面和共享声音，由服务器分发给所有观众。房主可在房间内选择“服务器广播”，或继续使用原有直连和成员中转。麦克风通话保持独立的成员间 P2P。
 
 ## 工作方式
 
 1. 所有成员通过 HTTPS 连接公网信令服务并加入房间。
-2. 浏览器交换 SDP 与 ICE 候选，依次尝试局域网直连和 STUN 公网打洞。
-3. 客户端拒绝 TURN `relay` 候选；无法完成 P2P 打洞的成员对会连接失败。
-4. 屏幕默认从房主到观众的星型 P2P 开始；自动模式会在房主持续受限时启用浅层树状转发。语音始终采用成员间 mesh。
+2. 默认模式下，浏览器交换 SDP 与 ICE 候选，依次尝试局域网直连和 STUN 公网打洞。P2P 连接仍拒绝 TURN `relay` 候选。
+3. 屏幕默认从房主到观众的星型 P2P 开始；自动模式会在房主持续受限时启用浅层树状转发。
+4. 启用并选择“服务器广播”后，房主和观众分别连接 VPS 上的 SFU，画面和共享声音经过服务器分发，不需要观众之间打洞。语音始终采用成员间 mesh。
 
-屏幕和共享来源声音来自 `getDisplayMedia`，麦克风来自独立的 `getUserMedia`，因此房主麦克风不会混入直播音轨。标签页使用浏览器提供的标签页独立音频；房主可在共享前选择窗口独立音频或系统混音，默认使用独立音频。共享整个屏幕时仍请求系统音频。系统混音可能包含 Syncast 播放的通话声音并形成回音。选择器会尽量排除当前 Syncast 标签页，直接共享 Syncast 自身标签页或窗口时仍会移除音轨。单房间最多 12 人，公网日常使用建议不超过 8 人；更大房间应改用 SFU。
+屏幕和共享来源声音来自 `getDisplayMedia`，麦克风来自独立的 `getUserMedia`，因此房主麦克风不会混入直播音轨。标签页使用浏览器提供的标签页独立音频；房主可在共享前选择窗口独立音频或系统混音，默认使用独立音频。共享整个屏幕时仍请求系统音频。系统混音可能包含 Syncast 播放的通话声音并形成回音。选择器会尽量排除当前 Syncast 标签页，直接共享 Syncast 自身标签页或窗口时仍会移除音轨。单房间仍最多 12 人，P2P 模式公网日常使用建议不超过 8 人；启用广播不会提高人数上限，因为语音仍使用 mesh。
 
 ### 动态树状转发
 
@@ -18,6 +18,7 @@ Syncast 是一个自托管的小型直播协作服务。公网服务器只负责
 - **自动**（新用户默认）：从直连开始。至少有四位观众且存在可中转成员时，每五秒检查视频发送统计；至少两条、且至少一半发送连接连续三次报告带宽或编码受限后，启用中转。启用后保持到本次共享结束或观众降至四人以下，避免压力下降后又反复切回。此判断是基于浏览器统计的启发式策略，不等同于测量房主总上行带宽。
 - **优先直连**：始终由房主发送给所有观众，不自动启用成员中转；无法打洞时不会回退到服务器媒体中继。
 - **节省上传**：主动使用浅层树状转发。通常房主只向三个第一层成员发送媒体，第一层成员再转发给叶节点。
+- **服务器广播**：需要部署者启用。房主上传一路视频及一路共享音频，VPS 分发给观众；不使用观众浏览器转发。广播与 P2P 模式可以在共享中切换，切换时可能短暂停顿。
 
 树状模式最多经过一个中转成员，普通中转最多带三个子节点。识别为移动设备的客户端只作为叶节点；中转容量不足时，多出的观众回退到房主，因此房主的三条连接目标不是硬限制。规划优先保留健康分支；分配新连接时结合已有语音链路的可达性、往返延迟（RTT）、子节点数量，以及连续两次采样确认的编码 CPU 压力选择中转。健康报告过期后不再参与择优，不会仅因 RTT 波动重建已有分支。成员加入、离开或连接恢复失败时，房主串行发布带版本的拓扑，观众确认订阅后上游才建立新连接。
 
@@ -27,7 +28,7 @@ Syncast 是一个自托管的小型直播协作服务。公网服务器只负责
 
 中转发生在成员浏览器之间，信令服务器不处理媒体；任意父子 WebRTC 连接都必须完成 P2P 打洞，不使用 TURN。浏览器中继会解码并重新编码远程轨道，可能增加延迟、CPU 占用和少量画质损失。中继节点固定向上游请求高帧画质，叶节点仍可以独立选择观看画质。
 
-观众可以独立选择观看质量，不影响房间内其他人：
+在 P2P 模式中，观众可以独立选择观看质量，不影响房间内其他人：
 
 | 档位 | 目标规格 | 最高视频码率 |
 |---|---|---:|
@@ -42,11 +43,11 @@ Syncast 是一个自托管的小型直播协作服务。公网服务器只负责
 
 ## P2P 与带宽分担
 
-STUN 只帮助浏览器发现公网地址，不转发媒体。服务端不会下发 TURN 地址，客户端也会丢弃 `relay` 候选，因此 NAT 穿透失败时不会占用 Syncast 服务器的媒体带宽，但对应成员也无法建立媒体连接。
+STUN 只帮助浏览器发现公网地址，不转发媒体。原有 P2P 连接不会使用 TURN，因此 NAT 穿透失败时对应成员无法建立直接媒体连接。服务器广播使用独立的 LiveKit WebRTC 连接，不依赖成员之间打洞；需要浏览器能访问 VPS 的媒体端口。
 
 直播连接方式及中转限制见上文“动态树状转发”。成员中转只转发直播画面和共享来源音频，语音保持独立 mesh。
 
-手机和蜂窝网络可以作为普通观看或语音节点，但蜂窝网络常见的 CGNAT、对称 NAT 会降低打洞成功率。当前实现不会选择手机作为中转节点。由于没有 TURN，打洞失败时不会自动回退到服务器。
+手机和蜂窝网络可以作为普通观看或语音节点，但蜂窝网络常见的 CGNAT、对称 NAT 会降低打洞成功率。当前实现不会选择手机作为中转节点。P2P 打洞失败时不会自动切换模式；房主可以主动选择已启用的服务器广播来传输直播。语音仍需 P2P 可达。
 
 ## 标准公网部署
 
@@ -81,6 +82,107 @@ docker compose --env-file .env -f compose.public.yaml up -d --build
 | 443 | TCP、UDP | HTTPS 和 HTTP/3 信令 |
 
 Caddy 会通过标准端口自动申请并续期 HTTPS 证书。若云厂商拦截标准 HTTP/HTTPS，请使用下一节的非标准端口部署，避免反复触发 ACME 验证。
+
+## 可选的 VPS 服务器广播
+
+服务器广播由 **LiveKit SFU 1.13.11** 提供，浏览器 SDK **2.23.0** 已随项目提供，不依赖 CDN。SFU 转发媒体包，不在 VPS 上解码或重新编码视频。不开启时，原来的部署命令和 P2P 行为不变。
+
+### 使用效果与边界
+
+- 房主在“直播连接方式”选择 **服务器广播**，观众自动跟随。没有配置时该选项不可用。
+- 画面路径为 `房主 → VPS → 各观众`。三个观众观看 10 Mbps 视频时，房主约上传 10 Mbps，VPS 约接收 10 Mbps、发出 30 Mbps，另加音频、协议及重传开销。
+- 为严格保持一路视频上传，关闭 simulcast 和备用编码，统一使用最高 1080p60、20 Mbps 视频及 192 kbps 共享音频。实际质量受采集源、浏览器和网络限制。广播时观众画质选择器显示统一画质并禁用；切回 P2P 恢复个人选择。低带宽观众无法单独获得低清版本。
+- 麦克风继续使用 P2P，不进入广播；所以服务器广播可用不代表语音打洞一定成功。最多 12 人的限制保持不变。
+- 直播状态和拓扑会显示广播服务器；LiveKit 自动处理短暂断线，失败时显示重连提示，可点击“重新连接”或由房主切回 P2P。广播不使用原有成员间的媒体停滞检测。
+- 浏览器到 SFU 的传输加密在服务器终止，VPS 是受信任的媒体处理节点；此模式不是成员之间的端到端加密。
+
+### 标准 HTTPS 部署
+
+在 `.env` 中追加（IP 和 secret 必须替换）：
+
+```dotenv
+SYNCAST_PUBLIC_IP=203.0.113.10
+LIVEKIT_API_KEY=syncast
+LIVEKIT_API_SECRET=替换为随机密钥
+```
+
+用 `openssl rand -hex 32` 生成密钥，粘贴到 `LIVEKIT_API_SECRET`。API key 使用字母数字，secret 使用生成的十六进制值。`SYNCAST_PUBLIC_IP` 必须是浏览器可达的 VPS 公网 IPv4。不要把 `.env` 提交到 Git。
+
+```bash
+docker compose --env-file .env \
+  -f compose.public.yaml -f compose.broadcast.yaml config --quiet
+
+docker compose --env-file .env \
+  -f compose.public.yaml -f compose.broadcast.yaml up -d --build
+```
+
+除原有 HTTPS 端口外，在云安全组和系统防火墙放行：
+
+| 端口 | 协议 | 用途 |
+|---|---|---|
+| 7881 | TCP | WebRTC TCP，UDP 不可用时使用 |
+| 7882 | UDP | WebRTC 音视频 |
+
+端口映射必须保持同号。媒体端口直接到 VPS，不能通过普通 HTTP/CDN 代理。`7880` 只在 Compose 内网提供 LiveKit API；浏览器信令通过 Caddy 的 `/Syncast/sfu/` 路由连接。此配置针对单台 Linux VPS，不要求 Redis，不启用 TURN。
+
+```bash
+docker compose --env-file .env \
+  -f compose.public.yaml -f compose.broadcast.yaml logs --tail=100 livekit syncast caddy
+```
+
+`/Syncast/api/health` 的 `broadcast.configured: true` 表示 Syncast 配置已就绪，**不代表 SFU 或公网媒体端口已通过检查**。部署后用不同网络的两台设备实际共享并观看，确认画面、共享声音和“服务器广播 · 上传 1 路”状态。
+
+### 已使用 8965 等非标准 HTTPS 端口
+
+保留已有证书及 HTTPS 配置，在 `.env` 另加：
+
+```dotenv
+SYNCAST_LIVEKIT_URL=wss://hw.sharelter.online:8965/Syncast/sfu
+```
+
+在自己的 `Caddyfile.8965` 中、`handle_path /Syncast/*` **之前**加入：
+
+```caddyfile
+handle_path /Syncast/sfu/* {
+    reverse_proxy livekit:7880
+}
+```
+
+覆盖文件顺序要让已有端口/证书配置最后生效：
+
+```bash
+docker compose --env-file .env \
+  -f compose.public.yaml -f compose.broadcast.yaml -f compose.8965.yaml \
+  up -d --build
+```
+
+使用旧版 `/usr/bin/docker-compose` 时，同样按上述顺序加入三个 `-f` 参数。媒体仍使用 `7881/TCP`、`7882/UDP`，与 HTTPS 端口及 DERP 的 `8964` 无关。
+
+### 使用已有 LiveKit 或不使用 Compose
+
+启动 `server.py` 前设置：
+
+```bash
+export SYNCAST_BROADCAST_ENABLED=true
+export SYNCAST_LIVEKIT_URL=wss://media.example.com
+export SYNCAST_LIVEKIT_API_URL=https://media.example.com
+export LIVEKIT_API_KEY=syncast
+export LIVEKIT_API_SECRET=替换为随机密钥
+python3 server.py
+```
+
+外部 LiveKit 必须使用相同密钥。公开 URL 用于浏览器连接，API URL 用于后端移除成员和关闭媒体房间。启用但配置不完整时服务会拒绝启动。Python 仍只使用标准库。
+
+每次连接通过当前房间会话换取 60 秒入场令牌，房主仅可发布屏幕及共享音频，观众仅可订阅；API secret 不下发到浏览器。房间离开、过期会异步调用 LiveKit 清理接口，失败最多重试三次并记录日志。令牌有效期限制入场，不是已建立连接的时长限制；自托管 LiveKit 的已签发令牌在过期前可能再次使用，因此不能将退出操作视为即时撤销凭据。
+
+回退时先停止可选媒体服务，再恢复原部署：
+
+```bash
+docker compose --env-file .env -f compose.public.yaml -f compose.broadcast.yaml stop livekit
+docker compose --env-file .env -f compose.public.yaml up -d --build
+```
+
+若使用自定义 `Caddyfile.8965`，移除其中的 SFU 路由并保留对应覆盖文件。回退会中断正在进行的广播。
 
 ## 非标准端口与手动证书
 
@@ -186,7 +288,7 @@ curl --noproxy '*' -i https://hw.sharelter.online:8965/Syncast/api/health
 
 ## ZeroTier 可选组网
 
-当公网 P2P 打洞经常失败时，可以让所有参与者加入同一个 ZeroTier 网络。只让 Syncast 服务器加入 ZeroTier 没有作用，因为服务器不转发媒体。浏览器还必须收集到 ZeroTier 虚拟网卡对应的 ICE 候选，系统防火墙也要允许该网卡上的 UDP 流量。
+当公网 P2P 打洞经常失败时，可以让所有参与者加入同一个 ZeroTier 网络。在 P2P 模式中，只让 Syncast 信令服务器加入 ZeroTier 没有作用。浏览器还必须收集到 ZeroTier 虚拟网卡对应的 ICE 候选，系统防火墙也要允许该网卡上的 UDP 流量。
 
 ZeroTier 能显著改善 CGNAT 环境的可达性，但不能保证底层始终物理直连；当 ZeroTier 自身打洞失败时，流量可能经过 ZeroTier 基础设施。手机还需要保持 ZeroTier VPN 在线，后台省电策略可能中断连接。可通过 `chrome://webrtc-internals` 检查最终选中的候选地址是否属于 ZeroTier 网段。
 
@@ -247,6 +349,7 @@ node tests/media.test.js
 node tests/topology.test.js
 node tests/health.test.js
 node --check static/app.js
+node --check static/broadcast.js
 docker compose --env-file .env -f compose.public.yaml config --quiet
 ```
 
@@ -260,3 +363,18 @@ python3 -m venv /tmp/syncast-test-venv
 ```
 
 也可以通过 `SYNCAST_TEST_BROWSER` 指定已有 Chrome/Chromium 可执行文件，省略浏览器下载。测试通过实际解码帧和音频接收量增长验证媒体传输，覆盖五人语音、星型和树状共享、独立画质、共享重启后的静音保持、中转成员退出、房主关闭房间、麦克风权限拒绝与恢复、加入失败后的采集释放，以及窄屏操作栏。还覆盖延迟新上游时的旧画面保持、健康分支不重建、自动模式的持续压力门槛，以及注入 ICE 故障和丢失信令后的恢复与重试上限。新增测试覆盖连接仍正常时的媒体停滞检测、直播重建期间的语音保持、共享音频恢复前的重试计数、手动重连，以及编码压力报告的过期与中转选择。真实屏幕选择器、系统音频兼容性和公网 P2P 穿透仍需在目标设备及网络上验证。
+
+服务器广播的真实浏览器测试另需本机 `livekit-server`（与部署版本一致）。测试会自行启动仅监听本机的 SFU，使用合成媒体验证三名观众收流、房主只发送一份视频、共享声音开关、广播与 P2P 互切、重连、停止和重启共享、房主离开及 SFU 故障提示：
+
+```bash
+SYNCAST_TEST_LIVEKIT=/path/to/livekit-server \
+  /tmp/syncast-test-venv/bin/python tests/browser_broadcast.py
+```
+
+配置校验（不需要启动 Docker daemon；变量为测试值）：
+
+```bash
+SYNCAST_DOMAIN=test.example SYNCAST_PUBLIC_IP=203.0.113.10 \
+LIVEKIT_API_KEY=syncast LIVEKIT_API_SECRET=0123456789abcdef0123456789abcdef \
+  docker compose -f compose.public.yaml -f compose.broadcast.yaml config --quiet
+```

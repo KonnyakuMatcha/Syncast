@@ -1,0 +1,202 @@
+"""Real SFU checks. Set SYNCAST_TEST_LIVEKIT to a livekit-server binary.
+
+Uses local-only services, synthetic video/audio and Playwright Chromium.
+"""
+
+import json
+import os
+from pathlib import Path
+import socket
+import subprocess
+import tempfile
+import time
+import unittest
+from unittest.mock import patch
+from urllib.request import urlopen
+
+import browser_functional as functional
+
+
+def free_port():
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+@unittest.skipUnless(os.environ.get("SYNCAST_TEST_LIVEKIT"), "Set SYNCAST_TEST_LIVEKIT to test real SFU media")
+class BroadcastFunctionalTests(unittest.TestCase):
+    setUp = functional.BrowserFunctionalTests.setUp
+    tearDown = functional.BrowserFunctionalTests.tearDown
+    page = functional.BrowserFunctionalTests.page
+    wait_async = functional.BrowserFunctionalTests.wait_async
+    assert_receiving_p2p = functional.BrowserFunctionalTests.assert_receiving
+
+    @classmethod
+    def setUpClass(cls):
+        cls.temp = tempfile.TemporaryDirectory(prefix="syncast-broadcast-")
+        cls.addClassCleanup(cls.temp.cleanup)
+        port, tcp, udp = free_port(), free_port(), free_port()
+        config = {
+            "port": port, "bind_addresses": ["127.0.0.1"],
+            "rtc": {"node_ip": "127.0.0.1", "use_external_ip": False,
+                    "enable_loopback_candidate": True, "tcp_port": tcp, "udp_port": udp},
+            "keys": {"testkey": "0123456789abcdef0123456789abcdef"},
+            "logging": {"level": "warn"},
+        }
+        log = open(Path(cls.temp.name) / "livekit.log", "w+")
+        cls.addClassCleanup(log.close)
+        cls.sfu = subprocess.Popen([os.environ["SYNCAST_TEST_LIVEKIT"], "--config-body", json.dumps(config)], stdout=log, stderr=log)
+
+        def stop_sfu():
+            cls.sfu.terminate()
+            try:
+                cls.sfu.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                cls.sfu.kill()
+                cls.sfu.wait()
+
+        cls.addClassCleanup(stop_sfu)
+        for _ in range(100):
+            try:
+                with urlopen(f"http://127.0.0.1:{port}", timeout=1):
+                    break
+            except OSError:
+                if cls.sfu.poll() is not None:
+                    log.seek(0)
+                    raise RuntimeError(log.read())
+                time.sleep(0.1)
+        else:
+            raise RuntimeError("LiveKit did not start")
+        cls.environment = patch.dict(os.environ, {
+            "SYNCAST_BROADCAST_ENABLED": "true",
+            "SYNCAST_LIVEKIT_URL": f"ws://127.0.0.1:{port}",
+            "SYNCAST_LIVEKIT_API_URL": f"http://127.0.0.1:{port}",
+            "LIVEKIT_API_KEY": "testkey",
+            "LIVEKIT_API_SECRET": config["keys"]["testkey"],
+        })
+        cls.environment.start()
+        cls.addClassCleanup(cls.environment.stop)
+        functional.BrowserFunctionalTests.setUpClass.__func__(cls)
+        cls.addClassCleanup(functional.BrowserFunctionalTests.tearDownClass.__func__, cls)
+
+    def assert_receiving(self, page):
+        page.wait_for_function("state.broadcastClient?.room?.state === 'connected'", timeout=30000)
+        stats = """async () => {
+          const remote = state.broadcastClient.room.remoteParticipants.get(state.hostId);
+          let frames = 0, audio = 0;
+          for (const pub of remote?.trackPublications.values() || []) {
+            const reports = await pub.track?.getRTCStatsReport();
+            for (const report of reports?.values() || []) {
+              if (report.type !== 'inbound-rtp') continue;
+              if (report.kind === 'video') frames += report.framesDecoded || 0;
+              if (report.kind === 'audio') audio += report.bytesReceived || 0;
+            }
+          }
+          return {frames, audio};
+        }"""
+        baseline = page.evaluate(stats)
+        deadline = time.monotonic() + 25
+        while time.monotonic() < deadline:
+            current = page.evaluate(stats)
+            if current["frames"] > baseline["frames"] + 2 and current["audio"] > baseline["audio"]:
+                self.assertEqual(page.evaluate("state.stagePeers.size"), 0)
+                self.assertTrue(page.locator("#quality-select").is_disabled())
+                return
+            page.wait_for_timeout(100)
+        self.fail(f"SFU media did not advance: {baseline} -> {current}")
+
+    def test_single_upload_multi_viewer_switch_restart_reconnect_and_close(self):
+        host = self.page("Host")
+        code = host.locator("#room-code-label").inner_text()
+        first = self.page("First", code)
+        host.locator("#share-button").click()
+        self.assert_receiving_p2p(first)
+        host.evaluate("window.originalCapture = state.display; window.voicePC = [...state.voicePeers.values()][0].pc")
+        host.locator("#topology-mode").select_option("server")
+        self.assert_receiving(first)
+        guests = [first, self.page("Second", code), self.page("Third", code)]
+        for guest in guests[1:]:
+            self.assert_receiving(guest)
+        host.wait_for_function("state.broadcastClient?.source === state.display")
+        self.assertTrue(host.evaluate("state.display === window.originalCapture && window.voicePC === [...state.voicePeers.values()][0].pc"))
+        stats = host.evaluate("""async () => {
+          const publications = [...state.broadcastClient.room.localParticipant.trackPublications.values()];
+          const video = publications.find(pub => pub.kind === 'video').track;
+          const reports = [...(await video.getRTCStatsReport()).values()];
+          return {tracks: publications.length, peers: state.stagePeers.size,
+            encodings: video.sender.getParameters().encodings.length,
+            streams: reports.filter(s => s.type === 'outbound-rtp' && s.kind === 'video' && s.framesEncoded > 0).length};
+        }""")
+        self.assertEqual(stats, {"tracks": 2, "peers": 0, "encodings": 1, "streams": 1})
+        self.assertIn("上传 1 路", host.locator("#stage-connection-status").inner_text())
+        self.assertIn("广播服务器", first.locator("#topology-map").inner_text())
+
+        host.locator("#sound-button").click()
+        self.assertTrue(host.evaluate("state.broadcastClient.tracks.filter(t => t.kind === 'audio').every(t => !t.enabled)"))
+        host.locator("#sound-button").click()
+        first.locator("#sound-button").click()
+        self.assertTrue(first.evaluate("document.querySelector('#stage-video').muted"))
+        first.locator("#reconnect-button").click()
+        self.assert_receiving(first)
+        self.assertTrue(first.evaluate("document.querySelector('#stage-video').muted"))
+
+        host.locator("#reconnect-button").click()
+        for guest in guests:
+            self.assert_receiving(guest)
+        host.locator("#topology-mode").select_option("direct")
+        for guest in guests:
+            self.assert_receiving_p2p(guest)
+            self.assertFalse(guest.locator("#quality-select").is_disabled())
+        self.assertTrue(host.evaluate("state.display.active && state.broadcastClient === null"))
+        host.locator("#topology-mode").select_option("server")
+        for guest in guests:
+            self.assert_receiving(guest)
+
+        host.locator("#share-button").click()
+        first.wait_for_function("state.broadcastClient === null && document.querySelector('#stage-video').srcObject === null")
+        self.assertIsNone(host.evaluate("state.broadcastClient"))
+        host.locator("#share-button").click()
+        for guest in guests:
+            self.assert_receiving(guest)
+        self.assertTrue(first.evaluate("document.querySelector('#stage-video').muted"))
+        host.locator("#leave-button").click()
+        for guest in guests:
+            guest.locator("#lobby").wait_for(state="visible")
+
+    def test_unavailable_sfu_is_visible_and_can_return_to_p2p(self):
+        host = self.page("Host")
+        guest = self.page("Guest", host.locator("#room-code-label").inner_text())
+        host.route("**/broadcast-token", lambda route: route.fulfill(
+            status=503, content_type="application/json", body='{"error":"SFU unavailable"}'))
+        host.locator("#topology-mode").select_option("server")
+        host.locator("#share-button").click()
+        host.wait_for_function("state.broadcastClient?.status === 'failed'")
+        self.assertIn("广播连接失败", host.locator("#stage-connection-status").inner_text())
+        host.locator("#topology-mode").select_option("direct")
+        self.assert_receiving_p2p(guest)
+        host.locator("#leave-button").click()
+
+    def test_stop_while_connecting_does_not_publish_a_stale_capture(self):
+        host = self.page("Host")
+        guest = self.page("Guest", host.locator("#room-code-label").inner_text())
+        pending = []
+        host.route("**/broadcast-token", lambda route: pending.append(route))
+        host.locator("#topology-mode").select_option("server")
+        host.locator("#share-button").click()
+        deadline = time.monotonic() + 5
+        while not pending and time.monotonic() < deadline:
+            host.wait_for_timeout(50)
+        self.assertTrue(pending)
+        host.evaluate("window.staleClient = state.broadcastClient")
+        host.locator("#share-button").click()
+        pending[0].fulfill(status=503, content_type="application/json", body='{"error":"Cancelled test connection"}')
+        self.assertTrue(host.evaluate("window.staleClient.closed && state.broadcastClient === null && state.display === null"))
+        guest.wait_for_function("!state.stageExpected && state.broadcastClient === null")
+        host.unroute("**/broadcast-token")
+        host.locator("#share-button").click()
+        self.assert_receiving(guest)
+        host.locator("#leave-button").click()
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

@@ -29,7 +29,7 @@
         </div>
       </form>
       <p id="lobby-error" class="form-error" role="alert"></p>
-      <div class="privacy-note"><span class="privacy-dot"></span>媒体仅在房间成员间传输</div>
+      <div class="privacy-note"><span class="privacy-dot"></span>支持成员直连与可选服务器广播</div>
     </section>
   </main>
 
@@ -72,6 +72,7 @@
                 <option value="auto">自动</option>
                 <option value="direct">优先直连</option>
                 <option value="relay">节省上传</option>
+                <option value="server" disabled>服务器广播（未启用）</option>
               </select>
             </label>
             <span id="member-count" class="member-count">1</span>
@@ -144,6 +145,7 @@
   <script src="media.js"></script>
   <script src="health.js"></script>
   <script src="connections.js"></script>
+  <script src="broadcast.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
