@@ -198,6 +198,9 @@ input::placeholder { color: #59625c; }
 .quality-control > span { color: #778179; font-size: 9px; }
 .quality-control select { width: 100%; border: 0; padding: 0; color: #c7d0c9; background: transparent; outline: none; cursor: pointer; font-size: 10px; }
 .quality-control select option { color: var(--ink); background: var(--panel); }
+.quality-fields { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.quality-fields select { flex: 1 1 0; min-width: 0; }
+.quality-fields select + select { text-align: right; }
 .control-button { min-width: 76px; height: 52px; padding: 6px 10px; display: grid; place-items: center; align-content: center; gap: 4px; border: 1px solid #303732; border-radius: 4px; color: #b9c2bb; background: #1a1f1b; cursor: pointer; }
 .control-button:hover { border-color: #556159; background: #202621; }
 .control-button:disabled { opacity: .45; cursor: not-allowed; }

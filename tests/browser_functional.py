@@ -444,8 +444,13 @@ class BrowserFunctionalTests(unittest.TestCase):
         guests[0].locator('#mic-button').click()
         guest_id = guests[0].evaluate('state.clientId')
         host.wait_for_function('id => state.memberStates.get(id)?.muted', arg=guest_id)
-        guests[0].locator('#quality-select').select_option('smooth')
-        host.wait_for_function("id => state.stagePeers.get(id).pc.getSenders().find(s => s.track?.kind === 'video').getParameters().encodings[0].maxBitrate === 5000000", arg=guest_id)
+        guests[0].locator('#resolution-select').select_option('720')
+        guests[0].locator('#frame-rate-select').select_option('30')
+        host.wait_for_function("""id => {
+          const encoding = state.stagePeers.get(id).pc.getSenders()
+            .find(s => s.track?.kind === 'video').getParameters().encodings[0];
+          return encoding.maxBitrate === 5000000 && encoding.maxFramerate === 30;
+        }""", arg=guest_id)
         self.assertEqual(host.evaluate("""id => [...state.stagePeers]
           .filter(([peerId]) => peerId !== id)
           .map(([, peer]) => peer.pc.getSenders().find(s => s.track?.kind === 'video')

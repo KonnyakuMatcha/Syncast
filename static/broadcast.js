@@ -28,6 +28,7 @@ class SyncastBroadcast {
     this.pending = Promise.resolve();
     this.microphonePending = Promise.resolve();
     this.remoteVoices = new Map();
+    this.desiredQuality = "1080p60";
   }
 
   setStatus(status) {
@@ -48,7 +49,7 @@ class SyncastBroadcast {
     if (this.closed) return;
     const room = new sdk.Room({
       adaptiveStream: false,
-      dynacast: false,
+      dynacast: true,
       stopLocalTrackOnUnpublish: false,
       disconnectOnPageLeave: true,
     });
@@ -67,6 +68,7 @@ class SyncastBroadcast {
       for (const old of this.stream.getTracks().filter((item) => item.kind === track.kind)) this.stream.removeTrack(old);
       this.stream.addTrack(track.mediaStreamTrack);
       this.onStream(this.stream);
+      this.applyQuality();
     });
     room.on(sdk.RoomEvent.TrackUnsubscribed, (track, publication, participant) => {
       if (this.closed) return;
@@ -123,9 +125,13 @@ class SyncastBroadcast {
         await this.room.localParticipant.publishTrack(track, track.kind === "video" ? {
           source: sdk.Track.Source.ScreenShare,
           videoCodec: "vp8",
-          simulcast: false,
+          simulcast: true,
           backupCodec: false,
           screenShareEncoding: { maxBitrate: 20_000_000, maxFramerate: 60 },
+          screenShareSimulcastLayers: [
+            new sdk.VideoPreset({ width: 1280, height: 720, maxBitrate: 5_000_000, maxFramerate: 60 }),
+            new sdk.VideoPreset({ width: 1920, height: 1080, maxBitrate: 10_000_000, maxFramerate: 30 }),
+          ],
         } : {
           source: sdk.Track.Source.ScreenShareAudio,
           audioPreset: { maxBitrate: 192_000 },
@@ -139,6 +145,32 @@ class SyncastBroadcast {
       this.setStatus("connected");
     });
     return this.pending;
+  }
+
+  setQuality(quality) {
+    this.desiredQuality = /^(720|1080)p(30|60)$/.test(quality) ? quality : "1080p60";
+    this.pending = this.pending.catch(() => {}).then(async () => {
+      await this.connect();
+      this.applyQuality();
+    });
+    return this.pending;
+  }
+
+  applyQuality() {
+    if (this.closed || this.isHost || !this.room) return;
+    const sdk = window.LivekitClient;
+    const publication = this.room.remoteParticipants
+      .get(this.hostId)
+      ?.getTrackPublication(sdk.Track.Source.ScreenShare);
+    if (!publication?.track) return;
+    const [, resolutionText, frameRateText] = /^(720|1080)p(30|60)$/.exec(this.desiredQuality) || [];
+    const resolution = Number(resolutionText) || 1080;
+    const frameRate = Number(frameRateText) || 60;
+    const quality = resolution === 720
+      ? sdk.VideoQuality.LOW
+      : (frameRate === 60 ? sdk.VideoQuality.HIGH : sdk.VideoQuality.MEDIUM);
+    publication.setVideoQuality(quality);
+    publication.setVideoFPS?.(frameRate);
   }
 
   setMicrophone(stream, muted) {
@@ -254,6 +286,7 @@ function updateServerBroadcast() {
   const operation = Promise.all([
     client.setMicrophone(state.microphone, state.microphoneMuted),
     state.isHost ? client.setSource(state.display) : client.connect(),
+    state.isHost ? null : client.setQuality(viewerQuality()),
   ]);
   operation.catch((error) => {
     if (state.broadcastClient !== client || client.closed) return;
@@ -316,7 +349,7 @@ function serverBroadcastStatus() {
   if (["failed", "disconnected"].includes(client?.status)) return "广播连接失败 · 请重连";
   if (!client || client.status === "connecting") return "正在连接广播服务器";
   if (client.status !== "connected") return "广播重连中";
-  if (state.isHost) return client.source ? "服务器广播 · 上传 1 路" : "正在发布画面";
+  if (state.isHost) return client.source ? "服务器广播 · 上传 1 路 · 多层" : "正在发布画面";
   if (!state.stageStream?.getVideoTracks().length) return "等待广播画面";
-  return elements.stageVideo.paused ? "等待播放" : "服务器广播 · 播放中";
+  return elements.stageVideo.paused ? "等待播放" : `服务器广播 · 播放中 · ${formatViewerQuality()}`;
 }

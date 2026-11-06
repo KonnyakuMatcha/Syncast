@@ -36,7 +36,8 @@ const elements = {
   windowAudioControl: document.querySelector("#window-audio-control"),
   windowAudioSelect: document.querySelector("#window-audio-select"),
   qualityControl: document.querySelector("#quality-control"),
-  qualitySelect: document.querySelector("#quality-select"),
+  resolutionSelect: document.querySelector("#resolution-select"),
+  frameRateSelect: document.querySelector("#frame-rate-select"),
   mic: document.querySelector("#mic-button"),
   sound: document.querySelector("#sound-button"),
   leave: document.querySelector("#leave-button"),
@@ -45,7 +46,9 @@ const elements = {
   toast: document.querySelector("#toast"),
 };
 
-const DEFAULT_QUALITY = "high";
+const DEFAULT_RESOLUTION = 1080;
+const DEFAULT_FRAME_RATE = 60;
+const DEFAULT_QUALITY = `${DEFAULT_RESOLUTION}p${DEFAULT_FRAME_RATE}`;
 const DEFAULT_WINDOW_AUDIO_MODE = "isolated";
 const DEFAULT_TOPOLOGY_ENABLED = false;
 
@@ -95,17 +98,28 @@ const state = {
   topologyPublishing: Promise.resolve(),
   stageSubscriptions: new Map(),
   blockedStageEdges: new Map(),
-  preferredQuality: DEFAULT_QUALITY,
+  preferredResolution: DEFAULT_RESOLUTION,
+  preferredFrameRate: DEFAULT_FRAME_RATE,
   iceServers: [],
   iceRefreshSeconds: 0,
 };
 
 const QUALITY_PROFILES = {
-  smooth: { height: 720, frameRate: 30, maxBitrate: 5_000_000 },
-  clear: { height: 1080, frameRate: 30, maxBitrate: 10_000_000 },
-  high: { height: 1080, frameRate: 60, maxBitrate: 20_000_000 },
-  ultra: { height: 1440, frameRate: 30, maxBitrate: 24_000_000 },
+  "720p30": { height: 720, frameRate: 30, maxBitrate: 5_000_000 },
+  "720p60": { height: 720, frameRate: 60, maxBitrate: 5_000_000 },
+  "1080p30": { height: 1080, frameRate: 30, maxBitrate: 10_000_000 },
+  "1080p60": { height: 1080, frameRate: 60, maxBitrate: 20_000_000 },
 };
+
+function viewerQuality() {
+  const quality = `${state.preferredResolution}p${state.preferredFrameRate}`;
+  return Object.hasOwn(QUALITY_PROFILES, quality) ? quality : DEFAULT_QUALITY;
+}
+
+function formatViewerQuality(quality = viewerQuality()) {
+  const match = /^(\d+)p(\d+)$/.exec(quality);
+  return match ? `${match[1]}p · ${match[2]} fps` : `${DEFAULT_RESOLUTION}p · ${DEFAULT_FRAME_RATE} fps`;
+}
 
 let toastTimer;
 const appBasePath = window.location.pathname.replace(/\/+$/, "");
@@ -236,7 +250,8 @@ function startSession(session, name) {
   elements.windowAudioControl.hidden = !state.isHost;
   elements.windowAudioSelect.value = state.windowAudioMode;
   elements.qualityControl.hidden = state.isHost;
-  elements.qualitySelect.value = state.preferredQuality;
+  elements.resolutionSelect.value = String(state.preferredResolution);
+  elements.frameRateSelect.value = String(state.preferredFrameRate);
   elements.stageStatus.textContent = state.isHost ? "开始共享你的屏幕" : "等待房主开始共享";
   elements.stageSubstatus.textContent = state.isHost ? "系统声音可随画面共享" : "语音频道已就绪";
   history.replaceState(null, "", `?room=${state.roomCode}`);
@@ -577,10 +592,12 @@ async function applyStageTopology(assignment) {
 function updateMediaControls() {
   document.querySelector("#topology-hint").textContent = state.stageTransport === "server"
     ? "画面、共享声音和语音均由服务器转发" : "语音通过成员直连传输";
-  elements.qualitySelect.disabled = state.stageTransport === "server";
-  elements.qualitySelect.title = state.stageTransport === "server" ? "服务器广播使用房主统一画质" : "";
-  elements.qualityControl.querySelector("span").textContent = state.stageTransport === "server" ? "统一画质" : "观看画质";
-  elements.qualitySelect.value = state.stageTransport === "server" ? "high" : state.preferredQuality;
+  const server = state.stageTransport === "server";
+  elements.resolutionSelect.disabled = false;
+  elements.frameRateSelect.disabled = false;
+  elements.qualityControl.title = server ? "只影响此观众收到的画面" : "";
+  elements.resolutionSelect.value = String(state.preferredResolution);
+  elements.frameRateSelect.value = String(state.preferredFrameRate);
   const hostHasSilentShare = state.isHost && state.display && !state.display.getAudioTracks().length;
   elements.mic.classList.toggle("off", state.microphoneMuted || !state.microphone);
   elements.mic.querySelector(".control-label").textContent = state.microphoneMuted || !state.microphone ? "麦克风关闭" : "麦克风";
@@ -808,9 +825,12 @@ async function offerVoice(peerId) {
 }
 
 function requestStageQuality() {
-  if (state.stageTransport === "server") return;
+  if (state.stageTransport === "server") {
+    state.broadcastClient?.setQuality(viewerQuality());
+    return;
+  }
   if (!state.isHost && state.stageParentId) {
-    const quality = state.stageChildIds.size ? "high" : state.preferredQuality;
+    const quality = state.stageChildIds.size ? DEFAULT_QUALITY : viewerQuality();
     sendSignal(state.stageParentId, { channel: "stage-quality", quality });
   }
 }
@@ -818,7 +838,8 @@ function requestStageQuality() {
 async function updateDisplayFrameRate() {
   const track = state.display?.getVideoTracks()[0];
   if (!track) return;
-  const needsHighFrameRate = state.stageTransport === "server" || [...state.stageQualities.values()].some((quality) => quality === "high");
+  const needsHighFrameRate = state.stageTransport === "server"
+    || [...state.stageQualities.values()].some((quality) => QUALITY_PROFILES[quality]?.frameRate === 60);
   const frameRate = needsHighFrameRate ? 60 : 30;
   track.contentHint = needsHighFrameRate ? "motion" : "detail";
   try {
@@ -847,7 +868,7 @@ async function applyStageQuality(peerId, requestedQuality) {
   else delete encoding.maxBitrate;
   if (profile.frameRate) encoding.maxFramerate = profile.frameRate;
   else delete encoding.maxFramerate;
-  parameters.degradationPreference = quality === "high" ? "maintain-framerate" : "maintain-resolution";
+  parameters.degradationPreference = profile.frameRate === 60 ? "maintain-framerate" : "maintain-resolution";
   try {
     await sender.setParameters(parameters);
   } catch (error) {
@@ -1435,13 +1456,21 @@ elements.windowAudioSelect.addEventListener("change", () => {
   localStorage.setItem("syncast-window-audio", state.windowAudioMode);
   showToast(state.windowAudioMode === "system" ? "窗口将使用系统混音" : "窗口将使用独立音频");
 });
-elements.qualitySelect.addEventListener("change", () => {
-  const quality = elements.qualitySelect.value;
-  state.preferredQuality = Object.hasOwn(QUALITY_PROFILES, quality) ? quality : DEFAULT_QUALITY;
-  localStorage.setItem("syncast-quality", state.preferredQuality);
+function updatePreferredVideo() {
+  const resolution = Number(elements.resolutionSelect.value);
+  const frameRate = Number(elements.frameRateSelect.value);
+  const quality = `${resolution}p${frameRate}`;
+  if (!Object.hasOwn(QUALITY_PROFILES, quality)) return;
+  state.preferredResolution = resolution;
+  state.preferredFrameRate = frameRate;
+  localStorage.setItem("syncast-resolution", String(resolution));
+  localStorage.setItem("syncast-frame-rate", String(frameRate));
   requestStageQuality();
-  showToast(`观看画质已设为${elements.qualitySelect.selectedOptions[0].textContent}`);
-});
+  renderConnectionStatus();
+  showToast(`观看画面已设为 ${formatViewerQuality()}`);
+}
+elements.resolutionSelect.addEventListener("change", updatePreferredVideo);
+elements.frameRateSelect.addEventListener("change", updatePreferredVideo);
 elements.mic.addEventListener("click", toggleMicrophone);
 elements.reconnect.addEventListener("click", reconnectMedia);
 for (const event of ["playing", "pause", "loadeddata"]) elements.stageVideo.addEventListener(event, renderConnectionStatus);
@@ -1458,8 +1487,19 @@ window.addEventListener("beforeunload", () => {
 
 const initialCode = new URLSearchParams(location.search).get("room");
 if (initialCode) elements.code.value = initialCode.toUpperCase().slice(0, 6);
+const savedResolution = Number(localStorage.getItem("syncast-resolution"));
+if ([720, 1080].includes(savedResolution)) state.preferredResolution = savedResolution;
+const savedFrameRate = Number(localStorage.getItem("syncast-frame-rate"));
+if ([30, 60].includes(savedFrameRate)) state.preferredFrameRate = savedFrameRate;
 const savedQuality = localStorage.getItem("syncast-quality");
-if (Object.hasOwn(QUALITY_PROFILES, savedQuality)) state.preferredQuality = savedQuality;
+if (!localStorage.getItem("syncast-resolution") && !localStorage.getItem("syncast-frame-rate")) {
+  const legacyQuality = { smooth: "720p30", smooth60: "720p60", clear: "1080p30", high: "1080p60", ultra: "1080p60" };
+  const [resolution, frameRate] = (legacyQuality[savedQuality] || "").split("p");
+  if (resolution && frameRate) {
+    state.preferredResolution = Number(resolution);
+    state.preferredFrameRate = Number(frameRate);
+  }
+}
 const savedWindowAudioMode = localStorage.getItem("syncast-window-audio");
 if (["isolated", "system"].includes(savedWindowAudioMode)) state.windowAudioMode = savedWindowAudioMode;
 const savedTopologyMode = localStorage.getItem("syncast-topology-mode");

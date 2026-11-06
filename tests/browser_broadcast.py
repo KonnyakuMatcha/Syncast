@@ -17,6 +17,32 @@ from urllib.request import urlopen
 import browser_functional as functional
 
 
+BROADCAST_DISPLAY_FIXTURE = """
+window.testCaptures = [];
+navigator.mediaDevices.getDisplayMedia = async () => {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1920;
+  canvas.height = 1080;
+  const context = canvas.getContext('2d');
+  let frame = 0;
+  const timer = setInterval(() => {
+    context.fillStyle = `hsl(${frame++ % 360}, 80%, 50%)`;
+    context.fillRect(0, 0, canvas.width, canvas.height);
+  }, 16);
+  const stream = canvas.captureStream(60);
+  const audio = new AudioContext();
+  await audio.resume();
+  const oscillator = audio.createOscillator();
+  const destination = audio.createMediaStreamDestination();
+  oscillator.connect(destination);
+  oscillator.start();
+  stream.addTrack(destination.stream.getAudioTracks()[0]);
+  window.testCaptures.push({canvas, timer, audio, oscillator, stream});
+  return stream;
+};
+"""
+
+
 def free_port():
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -33,6 +59,9 @@ class BroadcastFunctionalTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        cls.display_fixture = patch.object(functional, "DISPLAY_FIXTURE", BROADCAST_DISPLAY_FIXTURE)
+        cls.display_fixture.start()
+        cls.addClassCleanup(cls.display_fixture.stop)
         cls.temp = tempfile.TemporaryDirectory(prefix="syncast-broadcast-")
         cls.addClassCleanup(cls.temp.cleanup)
         port, tcp, udp = free_port(), free_port(), free_port()
@@ -101,7 +130,8 @@ class BroadcastFunctionalTests(unittest.TestCase):
             current = page.evaluate(stats)
             if current["frames"] > baseline["frames"] + 2 and current["audio"] > baseline["audio"]:
                 self.assertEqual(page.evaluate("state.stagePeers.size"), 0)
-                self.assertTrue(page.locator("#quality-select").is_disabled())
+                self.assertFalse(page.locator("#resolution-select").is_disabled())
+                self.assertFalse(page.locator("#frame-rate-select").is_disabled())
                 return
             page.wait_for_timeout(100)
         self.fail(f"SFU media did not advance: {baseline} -> {current}")
@@ -155,6 +185,38 @@ class BroadcastFunctionalTests(unittest.TestCase):
         guests = [first, self.page("Second", code), self.page("Third", code)]
         for guest in guests[1:]:
             self.assert_receiving(guest)
+        expected_levels = [("720", "30", "LOW"), ("1080", "30", "MEDIUM"), ("1080", "60", "HIGH")]
+        for guest, (resolution, frame_rate, level) in zip(guests, expected_levels):
+            guest.locator("#resolution-select").select_option(resolution)
+            guest.locator("#frame-rate-select").select_option(frame_rate)
+            guest.wait_for_function(
+                "expected => {"
+                " const publication = state.broadcastClient?.room?.remoteParticipants.get(state.hostId)"
+                "   ?.getTrackPublication('screen_share');"
+                " return publication?.videoQuality === window.LivekitClient.VideoQuality[expected.level]"
+                "   && publication?.fps === expected.fps;"
+                "}",
+                arg={"level": level, "fps": int(frame_rate)},
+            )
+        first.locator("#frame-rate-select").select_option("60")
+        first.wait_for_function("""() => {
+          const publication = state.broadcastClient?.room?.remoteParticipants
+            .get(state.hostId)?.getTrackPublication('screen_share');
+          return publication?.videoQuality === window.LivekitClient.VideoQuality.LOW
+            && publication?.fps === 60;
+        }""")
+        first.locator("#frame-rate-select").select_option("30")
+        first.wait_for_function("""() => {
+          const publication = state.broadcastClient?.room?.remoteParticipants
+            .get(state.hostId)?.getTrackPublication('screen_share');
+          return publication?.videoQuality === window.LivekitClient.VideoQuality.LOW
+            && publication?.fps === 30;
+        }""")
+        self.assertEqual(first.evaluate(
+            "state.broadcastClient.room.remoteParticipants.get(state.hostId)"
+            ".getTrackPublication('screen_share').videoQuality"),
+            first.evaluate("window.LivekitClient.VideoQuality.LOW"),
+        )
         host.wait_for_function("state.broadcastClient?.source === state.display")
         self.assertTrue(host.evaluate("state.display === window.originalCapture && window.voicePC.connectionState === 'closed'"))
         self.assert_voices([host, *guests])
@@ -166,9 +228,20 @@ class BroadcastFunctionalTests(unittest.TestCase):
           const reports = [...(await video.getRTCStatsReport()).values()];
           return {tracks: publications.length, peers: state.stagePeers.size,
             encodings: video.sender.getParameters().encodings.length,
+            encodingDetails: video.sender.getParameters().encodings.map(encoding => ({
+              rid: encoding.rid, maxBitrate: encoding.maxBitrate,
+              maxFramerate: encoding.maxFramerate, scaleResolutionDownBy: encoding.scaleResolutionDownBy})),
             streams: reports.filter(s => s.type === 'outbound-rtp' && s.kind === 'video' && s.framesEncoded > 0).length};
         }""")
-        self.assertEqual(stats, {"tracks": 3, "peers": 0, "encodings": 1, "streams": 1})
+        self.assertEqual(stats["tracks"], 3)
+        self.assertEqual(stats["peers"], 0)
+        self.assertEqual(stats["encodings"], 3)
+        self.assertEqual(stats["encodingDetails"], [
+            {"rid": "q", "maxBitrate": 5_000_000, "maxFramerate": 60, "scaleResolutionDownBy": 1.5},
+            {"rid": "h", "maxBitrate": 10_000_000, "maxFramerate": 30, "scaleResolutionDownBy": 1},
+            {"rid": "f", "maxBitrate": 20_000_000, "maxFramerate": 60, "scaleResolutionDownBy": 1},
+        ])
+        self.assertGreaterEqual(stats["streams"], 1)
         self.assertIn("上传 1 路", host.locator("#stage-connection-status").inner_text())
         self.assertIn("广播服务器", first.locator("#topology-map").inner_text())
 
@@ -191,7 +264,8 @@ class BroadcastFunctionalTests(unittest.TestCase):
         host.locator("#topology-mode").select_option("direct")
         for guest in guests:
             self.assert_receiving_p2p(guest)
-            self.assertFalse(guest.locator("#quality-select").is_disabled())
+            self.assertFalse(guest.locator("#resolution-select").is_disabled())
+            self.assertFalse(guest.locator("#frame-rate-select").is_disabled())
         self.assertTrue(host.evaluate("state.display.active && state.broadcastClient === null"))
         self.assert_p2p_voices([host, *guests])
         host.locator("#topology-mode").select_option("server")

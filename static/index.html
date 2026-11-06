@@ -113,15 +113,19 @@
             <option value="system">系统混音</option>
           </select>
         </label>
-        <label id="quality-control" class="quality-control" hidden>
-          <span>观看画质</span>
-          <select id="quality-select" aria-label="观看画质">
-            <option value="smooth">流畅 · 720p30</option>
-            <option value="clear">清晰 · 1080p30</option>
-            <option value="high" selected>高帧 · 1080p60</option>
-            <option value="ultra">极清 · 1440p30</option>
-          </select>
-        </label>
+        <div id="quality-control" class="quality-control" hidden>
+          <span>画质 / 帧率</span>
+          <div class="quality-fields">
+            <select id="resolution-select" aria-label="画面分辨率">
+              <option value="720">720p</option>
+              <option value="1080" selected>1080p</option>
+            </select>
+            <select id="frame-rate-select" aria-label="画面帧率">
+              <option value="30">30 fps</option>
+              <option value="60" selected>60 fps</option>
+            </select>
+          </div>
+        </div>
         <button id="share-button" class="control-button share" type="button" hidden>
           <span class="control-icon" aria-hidden="true">▣</span><span class="control-label">共享屏幕</span>
         </button>

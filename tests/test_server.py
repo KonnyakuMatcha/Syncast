@@ -202,11 +202,12 @@ class LiveServerTests(unittest.TestCase):
         self.assertIn('src="app.js"', body)
         self.assertIn('id="topology-map"', body)
         self.assertNotIn('href="/styles.css"', body)
-        self.assertIn('<option value="high" selected>高帧 · 1080p60</option>', body)
+        self.assertIn('<option value="720">720p</option>', body)
+        self.assertIn('<option value="1080" selected>1080p</option>', body)
+        self.assertIn('<option value="30">30 fps</option>', body)
+        self.assertIn('<option value="60" selected>60 fps</option>', body)
         self.assertIn('id="topology-mode"', body)
         self.assertIn('src="topology.js"', body)
-        quality_options = body.split('id="quality-select"', 1)[1].split('</select>', 1)[0]
-        self.assertNotIn('<option value="auto">', quality_options)
 
     def test_room_join_and_directed_signal(self) -> None:
         status, host = self.request("POST", "/api/rooms", {"name": "Host"})
