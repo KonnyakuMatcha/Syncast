@@ -101,9 +101,14 @@ function renderConnectionStatus() {
   if (!state.running) return;
   elements.signalStatus.textContent = state.signalingOnline ? "已连接" : "正在重连";
   const guests = [...state.participants.keys()].filter((id) => id !== state.clientId);
-  const voiceProblems = guests.filter((id) => peerProblem(state.voicePeers.get(id)));
+  const voiceProblems = guests.filter((id) => voiceProblem(id));
   const connected = guests.length - voiceProblems.length;
   elements.voiceStatus.textContent = !guests.length ? "等待其他成员" : `已连接 ${connected}/${guests.length}`;
+  if (state.stageTransport === "server") {
+    const status = state.broadcastClient?.status;
+    elements.voiceStatus.textContent = status === "connected" ? `服务器语音 · ${connected}/${guests.length}`
+      : ["failed", "disconnected"].includes(status) ? "服务器语音连接失败" : "正在连接服务器语音";
+  }
   const stageIds = state.isHost ? [...state.stageChildIds] : [state.stageParentId].filter(Boolean);
   const stageProblems = state.stageExpected ? stageIds.filter((id) => peerProblem(state.stagePeers.get(id))) : [];
   const incoming = state.stagePeers.get(state.stageParentId);
@@ -114,7 +119,7 @@ function renderConnectionStatus() {
   if (state.stageTransport === "server") elements.stageConnectionStatus.textContent = serverBroadcastStatus();
   const name = (id) => state.participants.get(id)?.name || "成员";
   const details = [];
-  for (const id of voiceProblems) details.push(`语音 · ${name(id)}：${peerProblem(state.voicePeers.get(id))}`);
+  for (const id of voiceProblems) details.push(`语音 · ${name(id)}：${voiceProblem(id)}`);
   for (const id of stageProblems) details.push(`直播 · ${name(id)}：${peerProblem(state.stagePeers.get(id))}`);
   elements.connectionDetails.textContent = details.join("；");
   elements.reconnect.disabled = state.reconnecting;

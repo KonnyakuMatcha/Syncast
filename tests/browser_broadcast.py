@@ -85,6 +85,7 @@ class BroadcastFunctionalTests(unittest.TestCase):
           const remote = state.broadcastClient.room.remoteParticipants.get(state.hostId);
           let frames = 0, audio = 0;
           for (const pub of remote?.trackPublications.values() || []) {
+            if (!['screen_share', 'screen_share_audio'].includes(pub.source)) continue;
             const reports = await pub.track?.getRTCStatsReport();
             for (const report of reports?.values() || []) {
               if (report.type !== 'inbound-rtp') continue;
@@ -105,6 +106,43 @@ class BroadcastFunctionalTests(unittest.TestCase):
             page.wait_for_timeout(100)
         self.fail(f"SFU media did not advance: {baseline} -> {current}")
 
+    def assert_voices(self, pages):
+        ids = [page.evaluate("state.clientId") for page in pages]
+        for page, local_id in zip(pages, ids):
+            remote_ids = [identity for identity in ids if identity != local_id]
+            page.wait_for_function("ids => ids.every(id => state.broadcastClient?.remoteVoices.has(id))", arg=remote_ids)
+            snapshot = """async ids => Object.fromEntries(await Promise.all(ids.map(async id => {
+              const track = state.broadcastClient.remoteVoices.get(id);
+              const stats = await track?.getRTCStatsReport();
+              return [id, [...(stats?.values() || [])].filter(s => s.type === 'inbound-rtp' && s.kind === 'audio')
+                .reduce((sum, s) => sum + s.bytesReceived, 0)];
+            })))"""
+            baseline = page.evaluate(snapshot, remote_ids)
+            self.wait_async(page, """async baseline => {
+              for (const [id, before] of Object.entries(baseline)) {
+                const track = state.broadcastClient.remoteVoices.get(id);
+                const stats = await track?.getRTCStatsReport();
+                if (![...(stats?.values() || [])].some(s => s.type === 'inbound-rtp' && s.kind === 'audio' && s.bytesReceived > before)) return false;
+                const audio = document.getElementById(`voice-${id}`);
+                if (!audio || audio.paused || audio.muted || audio.readyState < 2) return false;
+              }
+              return true;
+            }""", arg=baseline)
+            self.assertEqual(page.evaluate("state.voicePeers.size"), 0)
+            self.assertIn("服务器语音", page.locator("#voice-status").inner_text())
+
+    def assert_p2p_voices(self, pages):
+        for page in pages:
+            self.wait_async(page, """async count => {
+              if (state.voicePeers.size !== count) return false;
+              for (const peer of state.voicePeers.values()) {
+                if (!peerTransportConnected(peer)) return false;
+                const stats = [...(await peer.pc.getStats()).values()];
+                if (!stats.some(s => s.type === 'inbound-rtp' && s.kind === 'audio' && s.bytesReceived > 0)) return false;
+              }
+              return true;
+            }""", arg=len(pages) - 1)
+
     def test_single_upload_multi_viewer_switch_restart_reconnect_and_close(self):
         host = self.page("Host")
         code = host.locator("#room-code-label").inner_text()
@@ -118,7 +156,10 @@ class BroadcastFunctionalTests(unittest.TestCase):
         for guest in guests[1:]:
             self.assert_receiving(guest)
         host.wait_for_function("state.broadcastClient?.source === state.display")
-        self.assertTrue(host.evaluate("state.display === window.originalCapture && window.voicePC === [...state.voicePeers.values()][0].pc"))
+        self.assertTrue(host.evaluate("state.display === window.originalCapture && window.voicePC.connectionState === 'closed'"))
+        self.assert_voices([host, *guests])
+        for guest in guests[1:]:
+            self.assertEqual(guest.evaluate("window.testVoiceSignals"), [])
         stats = host.evaluate("""async () => {
           const publications = [...state.broadcastClient.room.localParticipant.trackPublications.values()];
           const video = publications.find(pub => pub.kind === 'video').track;
@@ -127,15 +168,18 @@ class BroadcastFunctionalTests(unittest.TestCase):
             encodings: video.sender.getParameters().encodings.length,
             streams: reports.filter(s => s.type === 'outbound-rtp' && s.kind === 'video' && s.framesEncoded > 0).length};
         }""")
-        self.assertEqual(stats, {"tracks": 2, "peers": 0, "encodings": 1, "streams": 1})
+        self.assertEqual(stats, {"tracks": 3, "peers": 0, "encodings": 1, "streams": 1})
         self.assertIn("上传 1 路", host.locator("#stage-connection-status").inner_text())
         self.assertIn("广播服务器", first.locator("#topology-map").inner_text())
 
         host.locator("#sound-button").click()
         self.assertTrue(host.evaluate("state.broadcastClient.tracks.filter(t => t.kind === 'audio').every(t => !t.enabled)"))
+        self.assertTrue(host.evaluate("state.broadcastClient.microphoneTrack.enabled"))
+        self.assert_voices([host, first])
         host.locator("#sound-button").click()
         first.locator("#sound-button").click()
         self.assertTrue(first.evaluate("document.querySelector('#stage-video').muted"))
+        self.assert_voices([host, first])
         first.locator("#reconnect-button").click()
         self.assert_receiving(first)
         self.assertTrue(first.evaluate("document.querySelector('#stage-video').muted"))
@@ -143,18 +187,23 @@ class BroadcastFunctionalTests(unittest.TestCase):
         host.locator("#reconnect-button").click()
         for guest in guests:
             self.assert_receiving(guest)
+        self.assert_voices([host, *guests])
         host.locator("#topology-mode").select_option("direct")
         for guest in guests:
             self.assert_receiving_p2p(guest)
             self.assertFalse(guest.locator("#quality-select").is_disabled())
         self.assertTrue(host.evaluate("state.display.active && state.broadcastClient === null"))
+        self.assert_p2p_voices([host, *guests])
         host.locator("#topology-mode").select_option("server")
         for guest in guests:
             self.assert_receiving(guest)
 
+        host.evaluate("window.voiceClient = state.broadcastClient; window.micTrack = state.broadcastClient.microphoneTrack")
         host.locator("#share-button").click()
-        first.wait_for_function("state.broadcastClient === null && document.querySelector('#stage-video').srcObject === null")
-        self.assertIsNone(host.evaluate("state.broadcastClient"))
+        first.wait_for_function("!state.stageExpected && document.querySelector('#stage-video').srcObject === null")
+        host.wait_for_function("state.broadcastClient.tracks.length === 0")
+        self.assertTrue(host.evaluate("state.broadcastClient === window.voiceClient && window.micTrack === state.broadcastClient.microphoneTrack"))
+        self.assert_voices([host, *guests])
         host.locator("#share-button").click()
         for guest in guests:
             self.assert_receiving(guest)
@@ -172,6 +221,10 @@ class BroadcastFunctionalTests(unittest.TestCase):
         host.locator("#share-button").click()
         host.wait_for_function("state.broadcastClient?.status === 'failed'")
         self.assertIn("广播连接失败", host.locator("#stage-connection-status").inner_text())
+        self.assertIn("服务器语音连接失败", host.locator("#voice-status").inner_text())
+        host.evaluate("reconnectMedia()")
+        host.wait_for_function("state.broadcastClient?.status === 'failed'")
+        self.assertEqual(host.evaluate("state.voicePeers.size"), 0)
         host.locator("#topology-mode").select_option("direct")
         self.assert_receiving_p2p(guest)
         host.locator("#leave-button").click()
@@ -189,12 +242,51 @@ class BroadcastFunctionalTests(unittest.TestCase):
         self.assertTrue(pending)
         host.evaluate("window.staleClient = state.broadcastClient")
         host.locator("#share-button").click()
-        pending[0].fulfill(status=503, content_type="application/json", body='{"error":"Cancelled test connection"}')
-        self.assertTrue(host.evaluate("window.staleClient.closed && state.broadcastClient === null && state.display === null"))
-        guest.wait_for_function("!state.stageExpected && state.broadcastClient === null")
+        pending[0].continue_()
+        self.assertTrue(host.evaluate("!window.staleClient.closed && state.broadcastClient === window.staleClient && state.display === null"))
+        guest.wait_for_function("!state.stageExpected")
+        self.assert_voices([host, guest])
+        self.assertEqual(host.evaluate("[...state.broadcastClient.room.localParticipant.trackPublications.values()].map(p => p.source)"), ["microphone"])
         host.unroute("**/broadcast-token")
         host.locator("#share-button").click()
         self.assert_receiving(guest)
+        host.locator("#leave-button").click()
+
+    def test_server_voice_without_screen_muting_and_denied_microphone(self):
+        host = self.page("Host", server_mode=True)
+        code = host.locator("#room-code-label").inner_text()
+        first = self.page("First", code)
+        denied = self.page("Listener", code, denied=True)
+        self.assert_voices([host, first])
+        host_id, first_id = host.evaluate("state.clientId"), first.evaluate("state.clientId")
+        self.wait_async(denied, """async ids => {
+          for (const id of ids) {
+            const track = state.broadcastClient?.remoteVoices.get(id);
+            const stats = await track?.getRTCStatsReport();
+            if (![...(stats?.values() || [])].some(s => s.type === 'inbound-rtp' && s.bytesReceived > 0)) return false;
+          }
+          return true;
+        }""", arg=[host_id, first_id])
+        for page in [host, first, denied]:
+            self.assertEqual(page.evaluate("window.testVoiceSignals"), [])
+            self.assertEqual(page.evaluate("state.voicePeers.size + state.stagePeers.size"), 0)
+            self.assertIsNone(page.evaluate("state.display"))
+        first.locator("#mic-button").click()
+        first.wait_for_function("state.broadcastClient.microphonePublication.track.isMuted")
+        host.wait_for_function("id => state.broadcastClient.room.remoteParticipants.get(id)?.getTrackPublication('microphone')?.isMuted", arg=first_id)
+        self.assertFalse(first.evaluate("state.broadcastClient.microphoneTrack.enabled"))
+        first.locator("#reconnect-button").click()
+        first.wait_for_function("state.broadcastClient.microphonePublication?.track.isMuted")
+        self.assertFalse(first.evaluate("state.broadcastClient.microphoneTrack.enabled"))
+        first.locator("#mic-button").click()
+        self.assert_voices([host, first])
+        denied.evaluate("() => { navigator.mediaDevices.getUserMedia = window.testGetUserMedia; }")
+        denied.locator("#mic-button").click()
+        self.assert_voices([host, first, denied])
+        denied_id = denied.evaluate("state.clientId")
+        denied.locator("#leave-button").click()
+        host.wait_for_function("id => !state.broadcastClient.remoteVoices.has(id) && !document.getElementById(`voice-${id}`)", arg=denied_id)
+        self.assert_voices([host, first])
         host.locator("#leave-button").click()
 
 

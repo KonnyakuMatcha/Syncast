@@ -65,6 +65,8 @@ class Room:
     host_id: str
     participants: dict[str, Participant]
     broadcast_used: bool = False
+    media_transport: str = "p2p"
+    transport_version: int = 0
     created_at: float = field(default_factory=time.time)
     next_sequence: int = 1
     events: list[dict] = field(default_factory=list)
@@ -94,7 +96,7 @@ class RoomStore:
     def _new_client_id() -> str:
         return secrets.token_urlsafe(24)
 
-    def create(self, name: str, relay_capable: bool = True) -> tuple[Room, Participant]:
+    def create(self, name: str, relay_capable: bool = True, media_transport: str = "p2p") -> tuple[Room, Participant]:
         with self.lock:
             self.cleanup()
             while True:
@@ -103,6 +105,7 @@ class RoomStore:
                     break
             participant = Participant(self._new_client_id(), name, relay_capable)
             room = Room(code, participant.client_id, {participant.client_id: participant})
+            room.media_transport = media_transport
             self.rooms[code] = room
             return room, participant
 
@@ -221,18 +224,21 @@ class LiveHandler(BaseHTTPRequestHandler):
         return value is not False
 
     def room_response(self, room: Room, participant: Participant) -> dict:
-        return {
-            "roomCode": room.code,
-            "clientId": participant.client_id,
-            "sessionToken": participant.session_token,
-            "hostId": room.host_id,
-            "isHost": participant.client_id == room.host_id,
-            "sequence": room.next_sequence - 1,
-            "iceServers": build_ice_servers(),
-            "iceRefreshSeconds": 0,
-            "broadcastAvailable": broadcast.available(),
-            "participants": [item.public(room.host_id) for item in room.participants.values()],
-        }
+        with STORE.lock:
+            return {
+                "roomCode": room.code,
+                "clientId": participant.client_id,
+                "sessionToken": participant.session_token,
+                "hostId": room.host_id,
+                "isHost": participant.client_id == room.host_id,
+                "sequence": room.next_sequence - 1,
+                "iceServers": build_ice_servers(),
+                "iceRefreshSeconds": 0,
+                "broadcastAvailable": broadcast.available(),
+                "mediaTransport": room.media_transport,
+                "transportVersion": room.transport_version,
+                "participants": [item.public(room.host_id) for item in room.participants.values()],
+            }
 
     def bearer_token(self) -> str:
         authorization = self.headers.get("Authorization", "")
@@ -264,9 +270,11 @@ class LiveHandler(BaseHTTPRequestHandler):
         try:
             payload = self.read_json()
             if parsed.path == "/api/rooms":
+                transport = "server" if payload.get("mediaTransport") == "server" and broadcast.available() else "p2p"
                 room, participant = STORE.create(
                     self.clean_name(payload.get("name")),
                     self.relay_capable(payload.get("relayCapable")),
+                    transport,
                 )
                 self.send_json(self.room_response(room, participant), HTTPStatus.CREATED)
                 return
@@ -278,6 +286,26 @@ class LiveHandler(BaseHTTPRequestHandler):
                     self.relay_capable(payload.get("relayCapable")),
                 )
                 self.send_json(self.room_response(room, participant))
+                return
+            if len(parts) == 4 and parts[:2] == ["api", "rooms"] and parts[3] == "transport":
+                with STORE.lock:
+                    room, participant = STORE.authenticate(
+                        parts[2], str(payload.get("clientId", "")), self.bearer_token()
+                    )
+                    if participant.client_id != room.host_id:
+                        raise PermissionError("只有房主可以切换连接模式")
+                    transport = payload.get("mediaTransport")
+                    if transport not in ("p2p", "server"):
+                        raise ValueError("连接模式无效")
+                    if transport == "server" and not broadcast.available():
+                        raise ValueError("此服务器尚未启用服务器广播")
+                    if room.media_transport != transport:
+                        room.media_transport = transport
+                        room.transport_version += 1
+                        room.publish("media-transport", {
+                            "mediaTransport": transport, "transportVersion": room.transport_version,
+                        })
+                    self.send_json({"mediaTransport": room.media_transport, "transportVersion": room.transport_version})
                 return
             if len(parts) == 4 and parts[:2] == ["api", "rooms"] and parts[3] == "signal":
                 room, participant = STORE.authenticate(

@@ -92,14 +92,16 @@ class LiveServerTests(unittest.TestCase):
                 claims = json.loads(base64.urlsafe_b64decode(body + "=="))
                 self.assertEqual(claims["sub"], user["clientId"])
                 self.assertEqual(claims["video"]["room"], f"syncast-{host['roomCode']}-{host['clientId']}")
-                self.assertEqual(claims["video"]["canPublish"], user["isHost"])
-                self.assertEqual(claims["video"]["canSubscribe"], not user["isHost"])
+                self.assertTrue(claims["video"]["canPublish"])
+                self.assertTrue(claims["video"]["canSubscribe"])
                 self.assertFalse(claims["video"]["canPublishData"])
                 self.assertNotIn("roomAdmin", claims["video"])
                 self.assertLessEqual(claims["exp"] - int(time.time()), 60)
                 self.assertNotIn(self.broadcast_env["LIVEKIT_API_SECRET"], json.dumps(data))
                 if user["isHost"]:
-                    self.assertEqual(claims["video"]["canPublishSources"], ["screen_share", "screen_share_audio"])
+                    self.assertEqual(claims["video"]["canPublishSources"], ["microphone", "screen_share", "screen_share_audio"])
+                else:
+                    self.assertEqual(claims["video"]["canPublishSources"], ["microphone"])
             status, _ = self.request("POST", endpoint, {"clientId": host["clientId"]}, guest["sessionToken"])
             self.assertEqual(status, 401)
 
@@ -111,6 +113,37 @@ class LiveServerTests(unittest.TestCase):
                 status, _ = self.request("POST", f"/api/rooms/{host['roomCode']}/broadcast-token",
                                          {"clientId": host["clientId"]}, host["sessionToken"])
                 self.assertEqual(status, 400)
+
+    def test_only_host_can_change_transport_and_joiners_get_current_mode(self):
+        with patch.dict(server.os.environ, self.broadcast_env, clear=True):
+            _, host = self.request("POST", "/api/rooms", {"name": "Host", "mediaTransport": "server"})
+            code = host["roomCode"]
+            self.assertEqual(host["mediaTransport"], "server")
+            _, guest = self.request("POST", f"/api/rooms/{code}/join", {"name": "Guest"})
+            self.assertEqual(guest["mediaTransport"], "server")
+            endpoint = f"/api/rooms/{code}/transport"
+            for token in ["", guest["sessionToken"]]:
+                status, _ = self.request("POST", endpoint, {"clientId": guest["clientId"], "mediaTransport": "p2p"}, token)
+                self.assertEqual(status, 401)
+            status, data = self.request("POST", endpoint, {"clientId": host["clientId"], "mediaTransport": "p2p"}, host["sessionToken"])
+            self.assertEqual(status, 200)
+            self.assertEqual(data, {"mediaTransport": "p2p", "transportVersion": 1})
+            _, events = self.request("GET", f"/api/rooms/{code}/events?clientId={guest['clientId']}&since={guest['sequence']}", token=guest["sessionToken"])
+            self.assertEqual(events["events"][-1]["type"], "media-transport")
+            self.assertEqual(events["events"][-1]["payload"], data)
+            _, late = self.request("POST", f"/api/rooms/{code}/join", {"name": "Late"})
+            self.assertEqual(late["mediaTransport"], "p2p")
+            self.assertEqual(late["transportVersion"], 1)
+            status, _ = self.request("POST", endpoint, {"clientId": host["clientId"], "mediaTransport": "bad"}, host["sessionToken"])
+            self.assertEqual(status, 400)
+
+    def test_server_transport_cannot_be_enabled_without_configuration(self):
+        with patch.dict(server.os.environ, {}, clear=True):
+            _, host = self.request("POST", "/api/rooms", {"name": "Host", "mediaTransport": "server"})
+            self.assertEqual(host["mediaTransport"], "p2p")
+            status, _ = self.request("POST", f"/api/rooms/{host['roomCode']}/transport",
+                                     {"clientId": host["clientId"], "mediaTransport": "server"}, host["sessionToken"])
+            self.assertEqual(status, 400)
 
     def test_departed_members_cannot_get_new_broadcast_tokens(self):
         with patch.dict(server.os.environ, self.broadcast_env, clear=True):

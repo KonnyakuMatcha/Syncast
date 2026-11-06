@@ -80,6 +80,7 @@ const state = {
   broadcastAvailable: false,
   broadcastClient: null,
   stageTransport: "p2p",
+  transportVersion: 0,
   stageQualities: new Map(),
   stageStream: null,
   stageParentId: "",
@@ -179,7 +180,8 @@ async function enterRoom(mode) {
     const path = mode === "create" ? "/api/rooms" : `/api/rooms/${code}/join`;
     const session = await request(path, {
       method: "POST",
-      body: JSON.stringify({ name, relayCapable: canRelayStage() }),
+      body: JSON.stringify({ name, relayCapable: canRelayStage(),
+        mediaTransport: state.topologyMode === "server" ? "server" : "p2p" }),
     });
     state.microphoneMuted = microphoneDenied;
     startSession(session, name);
@@ -206,7 +208,8 @@ function startSession(session, name) {
   state.iceRefreshSeconds = Number(session.iceRefreshSeconds) || 0;
   state.broadcastAvailable = Boolean(session.broadcastAvailable);
   if (!state.broadcastAvailable && state.topologyMode === "server") state.topologyMode = "auto";
-  state.stageTransport = state.isHost && state.topologyMode === "server" ? "server" : "p2p";
+  state.stageTransport = session.mediaTransport === "server" ? "server" : "p2p";
+  state.transportVersion = Number(session.transportVersion) || 0;
   const serverOption = elements.topologyMode.querySelector('[value="server"]');
   serverOption.disabled = !state.broadcastAvailable;
   serverOption.textContent = state.broadcastAvailable ? "服务器广播" : "服务器广播（未启用）";
@@ -243,6 +246,7 @@ function startSession(session, name) {
   pollEvents();
   scheduleIceRefresh();
   broadcastMemberState();
+  if (state.stageTransport === "server") updateServerBroadcast();
   state.topologyMonitorTimer = setInterval(monitorTopology, 5000);
   state.healthTimer = setInterval(monitorConnections, 5000);
 }
@@ -329,7 +333,7 @@ function renderParticipants() {
       ? "房主"
       : (isLocalRelay ? `画面中转 · ${state.stageChildIds.size}` : (muted ? "已静音" : "通话中"));
     if (participant.id !== state.clientId) {
-      const problem = peerProblem(state.voicePeers.get(participant.id));
+      const problem = voiceProblem(participant.id);
       if (problem) role.textContent = `语音${problem}`;
     }
     name.append(role);
@@ -476,16 +480,18 @@ function publishStageTopology() {
 async function publishStageTopologyNow() {
   if (!state.isHost || !state.running) return;
   const enabled = state.topologyEnabled;
-  const transport = state.topologyMode === "server" ? "server" : "p2p";
+  const transport = state.stageTransport;
   const plan = currentTopologyPlan();
   const version = ++state.topologyVersion;
   const source = { live: Boolean(state.display), hasAudio: Boolean(state.display?.getAudioTracks().length), audioEnabled: state.sharedSoundEnabled };
-  await applyStageTopology({ version, enabled, transport, source, nodes: plan, ...plan[state.clientId] });
+  const transportVersion = state.transportVersion;
+  await applyStageTopology({ version, enabled, transport, transportVersion, source, nodes: plan, ...plan[state.clientId] });
   await Promise.all([...state.participants.keys()]
     .filter((id) => id !== state.clientId)
     .map((id) => sendSignal(id, {
       channel: "stage-topology",
       transport,
+      transportVersion,
       version,
       enabled,
       source,
@@ -495,6 +501,7 @@ async function publishStageTopologyNow() {
 }
 
 async function applyStageTopology(assignment) {
+  if (assignment.transportVersion !== undefined && assignment.transportVersion !== state.transportVersion) return;
   const version = Number(assignment.version) || 0;
   if (!state.isHost && version <= state.topologyVersion) return;
   state.topologyVersion = version;
@@ -505,23 +512,15 @@ async function applyStageTopology(assignment) {
     state.stageHasAudio = Boolean(assignment.source.hasAudio);
     state.stageAudioEnabled = Boolean(assignment.source.audioEnabled);
   }
-  const oldTransport = state.stageTransport;
-  state.stageTransport = assignment.transport === "server" ? "server" : "p2p";
   if (state.stageTransport === "server") {
     state.stageParentId = "";
     state.stageChildIds.clear();
     state.stageSubscriptions.clear();
     for (const id of [...state.stagePeers.keys()]) closeStagePeer(id);
-    if (oldTransport !== "server" && !state.isHost) showStage(false);
     updateServerBroadcast();
     renderParticipants();
     updateMediaControls();
     return;
-  }
-  if (oldTransport === "server") {
-    closeServerBroadcast();
-    state.stageStream = state.isHost ? state.display : null;
-    if (!state.isHost) showStage(false);
   }
   const oldParentId = state.stageParentId;
   const nodes = assignment.nodes;
@@ -576,6 +575,8 @@ async function applyStageTopology(assignment) {
 }
 
 function updateMediaControls() {
+  document.querySelector("#topology-hint").textContent = state.stageTransport === "server"
+    ? "画面、共享声音和语音均由服务器转发" : "语音通过成员直连传输";
   elements.qualitySelect.disabled = state.stageTransport === "server";
   elements.qualitySelect.title = state.stageTransport === "server" ? "服务器广播使用房主统一画质" : "";
   elements.qualityControl.querySelector("span").textContent = state.stageTransport === "server" ? "统一画质" : "观看画质";
@@ -604,6 +605,10 @@ function updateMediaControls() {
 
 async function sendSignal(peerId, data) {
   if (!state.running) return;
+  if (["voice", "voice-ready"].includes(data.channel)) {
+    if (state.stageTransport === "server") return;
+    data = { ...data, transportVersion: state.transportVersion };
+  }
   try {
     await request(`/api/rooms/${state.roomCode}/signal`, {
       method: "POST",
@@ -796,6 +801,7 @@ function createVoicePeer(peerId) {
 }
 
 async function offerVoice(peerId) {
+  if (!state.running || state.stageTransport === "server") return;
   const peer = createVoicePeer(peerId);
   await offerPeer("voice", peerId, peer);
   await sendSignal(peerId, { channel: "member-state", muted: state.microphoneMuted });
@@ -1024,6 +1030,14 @@ async function handleSignal(payload) {
   const peerId = payload.from;
   const data = payload.data || {};
   if (!state.participants.has(peerId)) return;
+  if (["voice", "voice-ready"].includes(data.channel)) {
+    if (state.stageTransport === "server"
+        || (data.transportVersion !== undefined && data.transportVersion !== state.transportVersion)) return;
+    if (data.channel === "voice-ready") {
+      await offerVoice(peerId);
+      return;
+    }
+  }
   if (data.channel === "peer-health") {
     acceptPeerHealth(peerId, data.report);
     return;
@@ -1092,7 +1106,6 @@ async function handleSignal(payload) {
   if (data.channel === "stage-stop") {
     if (peerId === state.hostId) {
       state.stageExpected = false;
-      closeServerBroadcast();
       state.stageRebuildState.clear();
       for (const stagePeerId of [...state.stagePeers.keys()]) closeStagePeer(stagePeerId);
       state.stageStream = null;
@@ -1106,6 +1119,7 @@ async function handleSignal(payload) {
     return;
   }
   if (!['voice', 'stage'].includes(data.channel)) return;
+  if (state.stageTransport === "server") return;
   if (data.channel === "stage"
       && peerId !== state.stageParentId
       && !state.stageChildIds.has(peerId)) return;
@@ -1119,11 +1133,16 @@ async function handleSignal(payload) {
 
 async function handleEvent(event) {
   const payload = event.payload;
+  if (event.type === "media-transport") {
+    applyMediaTransport(payload);
+    return;
+  }
   if (event.type === "participant-joined") {
     if (payload.id === state.clientId) return;
     state.participants.set(payload.id, payload);
     renderParticipants();
     await offerVoice(payload.id);
+    await sendSignal(payload.id, { channel: "member-state", muted: state.microphoneMuted });
     if (state.isHost) await publishStageTopology();
     return;
   }
@@ -1263,7 +1282,7 @@ function stopSharing() {
   if (!state.display) return;
   const display = state.display;
   state.display = null;
-  closeServerBroadcast();
+  if (state.stageTransport === "server") updateServerBroadcast();
   state.stageExpected = false;
   state.stageRebuildState.clear();
   state.autoRelay = { enabled: false, pressureSamples: 0 };
@@ -1331,6 +1350,7 @@ async function toggleMicrophone() {
     state.microphoneMuted = !state.microphoneMuted;
     state.microphone.getAudioTracks().forEach((track) => { track.enabled = !state.microphoneMuted; });
   }
+  if (state.stageTransport === "server") updateServerBroadcast();
   updateMediaControls();
   broadcastMemberState();
 }
@@ -1385,16 +1405,30 @@ elements.copy.addEventListener("click", async () => {
 elements.share.addEventListener("click", () => state.display ? stopSharing() : startSharing());
 elements.topologyMode.addEventListener("change", async () => {
   if (!state.isHost) return;
-  state.topologyMode = elements.topologyMode.value;
-  state.autoRelay = { enabled: false, pressureSamples: 0 };
-  state.topologyEnabled = state.topologyMode === "relay";
-  state.blockedStageEdges.clear();
-  localStorage.setItem("syncast-topology-mode", state.topologyMode);
-  await publishStageTopology();
-  await updateDisplayFrameRate();
-  showToast(state.topologyMode === "auto" ? "将根据房主负载自动选择连接方式"
-    : state.topologyMode === "server" ? "已切换服务器广播，房主只上传一路画面"
-    : (state.topologyEnabled ? "已开启中转，节省房主上传" : "已恢复房主直连"));
+  const requestedMode = elements.topologyMode.value;
+  elements.topologyMode.disabled = true;
+  try {
+    const config = await request(`/api/rooms/${state.roomCode}/transport`, {
+      method: "POST",
+      body: JSON.stringify({ clientId: state.clientId, mediaTransport: requestedMode === "server" ? "server" : "p2p" }),
+    });
+    applyMediaTransport(config);
+    state.topologyMode = requestedMode;
+    state.autoRelay = { enabled: false, pressureSamples: 0 };
+    state.topologyEnabled = state.topologyMode === "relay";
+    state.blockedStageEdges.clear();
+    localStorage.setItem("syncast-topology-mode", state.topologyMode);
+    await publishStageTopology();
+    await updateDisplayFrameRate();
+    showToast(state.topologyMode === "auto" ? "将根据房主负载自动选择连接方式"
+      : state.topologyMode === "server" ? "画面与语音均已切换到服务器"
+      : (state.topologyEnabled ? "已开启中转，节省房主上传" : "已恢复房主直连"));
+  } catch (error) {
+    elements.topologyMode.value = state.topologyMode;
+    showToast(error.message);
+  } finally {
+    elements.topologyMode.disabled = false;
+  }
 });
 elements.windowAudioSelect.addEventListener("change", () => {
   state.windowAudioMode = elements.windowAudioSelect.value === "system" ? "system" : "isolated";

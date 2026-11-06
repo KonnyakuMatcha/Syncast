@@ -83,10 +83,23 @@ class BrowserFunctionalTests(unittest.TestCase):
             context.close()
         self.assertEqual(self.errors, [], 'Browser JavaScript errors')
 
-    def page(self, name, code=None, denied=False):
+    def page(self, name, code=None, denied=False, server_mode=False):
         context = self.browser.new_context(permissions=['microphone'])
         self.contexts.append(context)
         context.add_init_script(DISPLAY_FIXTURE)
+        if server_mode:
+            context.add_init_script("localStorage.setItem('syncast-topology-mode', 'server')")
+        context.add_init_script("""
+          window.testVoiceSignals = [];
+          const originalFetch = window.fetch.bind(window);
+          window.fetch = (url, options) => {
+            if (String(url).endsWith('/signal') && options?.body) {
+              const data = JSON.parse(options.body).data;
+              if (data?.channel === 'voice') window.testVoiceSignals.push(data);
+            }
+            return originalFetch(url, options);
+          };
+        """)
         if denied:
             context.add_init_script("""
               window.testGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);

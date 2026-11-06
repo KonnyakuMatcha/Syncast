@@ -73,9 +73,9 @@ def join_credentials(room, participant) -> dict:
         "video": {
             "roomJoin": True,
             "room": room_name(room),
-            "canPublish": is_host,
-            "canPublishSources": ["screen_share", "screen_share_audio"] if is_host else [],
-            "canSubscribe": not is_host,
+            "canPublish": True,
+            "canPublishSources": ["microphone", "screen_share", "screen_share_audio"] if is_host else ["microphone"],
+            "canSubscribe": True,
             "canPublishData": False,
             "canUpdateOwnMetadata": False,
         },
