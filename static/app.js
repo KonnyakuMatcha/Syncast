@@ -29,6 +29,8 @@ const elements = {
   signalStatus: document.querySelector("#signal-status"),
   stageConnectionStatus: document.querySelector("#stage-connection-status"),
   connectionDetails: document.querySelector("#connection-details"),
+  broadcastDiagnostics: document.querySelector("#broadcast-diagnostics"),
+  broadcastStats: document.querySelector("#broadcast-stats"),
   reconnect: document.querySelector("#reconnect-button"),
   role: document.querySelector("#role-label"),
   selfName: document.querySelector("#self-name"),

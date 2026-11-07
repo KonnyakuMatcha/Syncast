@@ -231,11 +231,13 @@ class BroadcastFunctionalTests(unittest.TestCase):
             encodingDetails: video.sender.getParameters().encodings.map(encoding => ({
               rid: encoding.rid, maxBitrate: encoding.maxBitrate,
               maxFramerate: encoding.maxFramerate, scaleResolutionDownBy: encoding.scaleResolutionDownBy})),
+            degradation: video.sender.getParameters().degradationPreference,
             streams: reports.filter(s => s.type === 'outbound-rtp' && s.kind === 'video' && s.framesEncoded > 0).length};
         }""")
         self.assertEqual(stats["tracks"], 3)
         self.assertEqual(stats["peers"], 0)
         self.assertEqual(stats["encodings"], 3)
+        self.assertEqual(stats["degradation"], "maintain-framerate")
         self.assertEqual(stats["encodingDetails"], [
             {"rid": "q", "maxBitrate": 5_000_000, "maxFramerate": 60, "scaleResolutionDownBy": 1.5},
             {"rid": "h", "maxBitrate": 10_000_000, "maxFramerate": 30, "scaleResolutionDownBy": 1},
@@ -361,6 +363,52 @@ class BroadcastFunctionalTests(unittest.TestCase):
         denied.locator("#leave-button").click()
         host.wait_for_function("id => !state.broadcastClient.remoteVoices.has(id) && !document.getElementById(`voice-${id}`)", arg=denied_id)
         self.assert_voices([host, first])
+        host.locator("#leave-button").click()
+
+    def test_live_playback_not_reloaded_by_mic_or_members_and_reports_media_stats(self):
+        host = self.page("Host", server_mode=True)
+        code = host.locator("#room-code-label").inner_text()
+        guest = self.page("Guest", code)
+        host.locator("#share-button").click()
+        self.assert_receiving(guest)
+        self.assert_voices([host, guest])
+        guest.evaluate("""() => {
+          window.playerReloads = 0;
+          document.querySelector('#stage-video').addEventListener('loadstart', () => window.playerReloads++);
+        }""")
+        guest.locator("#mic-button").click()
+        guest.wait_for_function("state.broadcastClient.microphonePublication.track.isMuted")
+        guest.locator("#mic-button").click()
+        late = self.page("Late", code)
+        self.assert_receiving(late)
+        self.assert_receiving(guest)
+        late.locator("#leave-button").click()
+        guest.wait_for_function("state.participants.size === 2")
+        self.assert_receiving(guest)
+        self.assertEqual(guest.evaluate("window.playerReloads"), 0, "Updating an unchanged MediaStream must not reload the player")
+        for page in [host, guest]:
+            page.evaluate("state.broadcastClient.sampleMediaStats()")
+        self.assert_receiving(guest)
+        for page in [host, guest]:
+            page.evaluate("monitorConnections()")
+            self.wait_async(page, """async () => {
+              await monitorConnections();
+              const stats = state.broadcastClient.mediaStats;
+              return stats?.videoMbps > 0 && stats.audioMbps > 0
+                && stats.streams.some(s => s.fps > 0);
+            }""")
+            page.locator("#broadcast-diagnostics summary").click()
+            text = page.locator("#broadcast-stats").inner_text()
+            self.assertIn("Mbps", text)
+            self.assertIn("共享声音", text)
+            self.assertNotIn("NaN", text)
+            self.assertNotIn("Infinity", text)
+        self.assertIn("本机 → VPS", host.locator("#broadcast-stats").inner_text())
+        self.assertIn("VPS → 本机", guest.locator("#broadcast-stats").inner_text())
+        host.locator("#share-button").click()
+        guest.wait_for_function("!state.stageExpected")
+        self.assertTrue(guest.locator("#broadcast-diagnostics").is_hidden())
+        self.assert_voices([host, guest])
         host.locator("#leave-button").click()
 
 

@@ -185,6 +185,10 @@ input::placeholder { color: #59625c; }
 .connection-row strong { font-weight: 500; text-align: right; }
 .connection-details { max-height: 80px; overflow-y: auto; margin: 8px 0; color: var(--amber); font-size: 10px; line-height: 1.6; overflow-wrap: anywhere; }
 .connection-details:empty { display: none; }
+.broadcast-diagnostics { margin: 8px 0; font-size: 11px; color: var(--muted); }
+.broadcast-diagnostics summary { cursor: pointer; }
+.broadcast-diagnostics p { white-space: pre-line; line-height: 1.6; margin: 6px 0; }
+.broadcast-diagnostics small { display: block; line-height: 1.5; }
 .reconnect-button { width: 100%; margin-top: 8px; padding: 6px; border: 1px solid #414a43; border-radius: 4px; color: #b8c3ba; background: #202521; cursor: pointer; font-size: 11px; }
 .reconnect-button:hover { border-color: var(--green); }
 .reconnect-button:disabled { opacity: .6; cursor: wait; }

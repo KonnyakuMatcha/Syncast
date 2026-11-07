@@ -21,6 +21,11 @@ async function monitorConnections(sampleTime = Date.now()) {
   if (!state.running || state.healthBusy) return;
   state.healthBusy = true;
   try {
+    if (state.stageTransport === "server") {
+      await state.broadcastClient?.sampleMediaStats();
+      renderParticipants();
+      return;
+    }
     const entries = [
       ...[...state.voicePeers].map(([id, peer]) => ({ channel: "voice", id, peer })),
       ...[...state.stagePeers].filter(([, peer]) => !peer.retiring).map(([id, peer]) => ({ channel: "stage", id, peer })),
@@ -117,6 +122,8 @@ function renderConnectionStatus() {
     : state.isHost ? (stageIds.length ? `发送中 · ${stageIds.length} 路` : "等待观众")
     : elements.stageVideo.paused ? "等待播放" : "播放中";
   if (state.stageTransport === "server") elements.stageConnectionStatus.textContent = serverBroadcastStatus();
+  elements.broadcastDiagnostics.hidden = state.stageTransport !== "server" || !state.stageExpected;
+  elements.broadcastStats.textContent = SyncastBroadcastStats.format(state.broadcastClient?.mediaStats);
   const name = (id) => state.participants.get(id)?.name || "成员";
   const details = [];
   for (const id of voiceProblems) details.push(`语音 · ${name(id)}：${voiceProblem(id)}`);

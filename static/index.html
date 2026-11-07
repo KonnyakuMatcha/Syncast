@@ -95,6 +95,11 @@
           <div class="connection-row"><span>直播</span><strong id="stage-connection-status">等待共享</strong></div>
           <div class="connection-row"><span>语音</span><strong id="voice-status">正在连接</strong></div>
           <p id="connection-details" class="connection-details" role="status"></p>
+          <details id="broadcast-diagnostics" class="broadcast-diagnostics" hidden>
+            <summary>共享流统计</summary>
+            <p id="broadcast-stats"></p>
+            <small>每 5 秒更新；往返时间仅为本机与 VPS 之间，缓冲不等于端到端延迟。</small>
+          </details>
           <button id="reconnect-button" class="reconnect-button" type="button">重新连接</button>
         </section>
       </aside>
@@ -149,6 +154,7 @@
   <script src="media.js"></script>
   <script src="health.js"></script>
   <script src="connections.js"></script>
+  <script src="broadcast-stats.js"></script>
   <script src="broadcast.js"></script>
   <script src="app.js"></script>
 </body>

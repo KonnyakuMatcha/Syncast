@@ -119,12 +119,14 @@ class SyncastBroadcast {
         const track = original.clone();
         this.tracks.push(track);
         if (track.kind === "video") {
+          track.contentHint = "motion";
           await track.applyConstraints({ width: { max: 1920 }, height: { max: 1080 }, frameRate: { max: 60 } });
           if (this.closed) return;
         }
         await this.room.localParticipant.publishTrack(track, track.kind === "video" ? {
           source: sdk.Track.Source.ScreenShare,
           videoCodec: "vp8",
+          degradationPreference: "maintain-framerate",
           simulcast: true,
           backupCodec: false,
           screenShareEncoding: { maxBitrate: 20_000_000, maxFramerate: 60 },
@@ -220,6 +222,36 @@ class SyncastBroadcast {
     for (const track of this.tracks) if (track.kind === "audio") track.enabled = enabled;
   }
 
+  async sampleMediaStats() {
+    if (this.closed || !this.room || this.statsBusy) return;
+    this.statsBusy = true;
+    try {
+      const owner = this.isHost ? this.room.localParticipant : this.room.remoteParticipants.get(this.hostId);
+      const video = owner?.getTrackPublication(window.LivekitClient.Track.Source.ScreenShare)?.track;
+      const audio = owner?.getTrackPublication(window.LivekitClient.Track.Source.ScreenShareAudio)?.track;
+      if (!video) {
+        this.mediaStats = null;
+        this.statsTrack = null;
+        return;
+      }
+      const reports = await Promise.all([video, audio].map((track) => track?.getRTCStatsReport()));
+      if (this.closed || owner?.getTrackPublication(window.LivekitClient.Track.Source.ScreenShare)?.track !== video) return;
+      const combined = new Map();
+      reports.forEach((stats, index) => {
+        const kind = index === 0 ? "video" : "audio";
+        for (const [id, report] of stats || []) {
+          if (["inbound-rtp", "outbound-rtp"].includes(report.type) && report.kind !== kind) continue;
+          combined.set(id, report);
+        }
+      });
+      this.mediaStats = SyncastBroadcastStats.summarize(combined,
+        this.statsTrack === video ? this.mediaStats : null, this.isHost);
+      this.statsTrack = video;
+    } finally {
+      this.statsBusy = false;
+    }
+  }
+
   close() {
     this.closed = true;
     this.tracks.forEach((track) => track.stop());
@@ -271,9 +303,13 @@ function updateServerBroadcast() {
         state.stageStream = stream;
         const hasVideo = state.stageExpected && stream.getVideoTracks().some((track) => track.readyState === "live");
         if (hasVideo) {
-          elements.stageVideo.srcObject = stream;
+          // Reassigning the same stream restarts media loading and interrupts
+          // both video and shared audio when a member joins or a mic changes.
+          if (elements.stageVideo.srcObject !== stream) elements.stageVideo.srcObject = stream;
           elements.stageVideo.muted = !state.sharedSoundEnabled;
-          elements.stageVideo.play().catch(() => showToast("点击重新连接以播放共享声音"));
+          if (elements.stageVideo.paused) {
+            elements.stageVideo.play().catch(() => showToast("点击重新连接以播放共享声音"));
+          }
         }
         showStage(hasVideo);
         renderConnectionStatus();
