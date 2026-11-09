@@ -34,7 +34,7 @@ class ReliableBroadcast {
       : { width: { max: 1920 }, height: { max: 1080 }, frameRate: { max: 60 } });
     if (this.closed || serial !== this.serial) return;
     const generation = crypto.randomUUID();
-    let sequence = 0;
+    this.nextSequence = 0;
     this.queue = [];
     const recorder = new MediaRecorder(this.capture, { mimeType: RELIABLE_MIME,
       videoBitsPerSecond: (smooth ? 2 : profile === "balanced" ? 6 : maxMbps) * 1_000_000,
@@ -42,7 +42,7 @@ class ReliableBroadcast {
     this.recorder = recorder;
     recorder.ondataavailable = ({ data }) => {
       if (!data.size || this.closed || serial !== this.serial) return;
-      this.queue.push({ generation, sequence: sequence++, data, serial });
+      this.queue.push({ generation, data, serial });
       if (this.queue.reduce((size, item) => size + item.data.size, 0) > 12 * 1024 * 1024) {
         this.fail(new Error("广播上传落后，请降低视频目标或检查房主上行"));
         return;
@@ -56,8 +56,17 @@ class ReliableBroadcast {
 
   upload() {
     while (this.uploading < 4 && this.queue.length && !this.closed && this.status !== "failed") {
-      const item = this.queue.shift();
-      if (item.serial !== this.serial) continue;
+      const first = this.queue.shift();
+      if (first.serial !== this.serial) continue;
+      const parts = [first.data];
+      let size = first.data.size;
+      while (this.queue.length && this.queue[0].serial === first.serial
+          && size + this.queue[0].data.size <= 3 * 1024 * 1024) {
+        const next = this.queue.shift();
+        parts.push(next.data);
+        size += next.data.size;
+      }
+      const item = { ...first, sequence: this.nextSequence++, data: new Blob(parts, { type: RELIABLE_MIME }) };
       this.uploading++;
       (async () => {
         for (let attempt = 0; attempt < 3; attempt++) {
