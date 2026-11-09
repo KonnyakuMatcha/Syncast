@@ -63,7 +63,10 @@ class BrowserFunctionalTests(unittest.TestCase):
             args=['--use-fake-device-for-media-stream', '--use-fake-ui-for-media-stream',
                   '--autoplay-policy=no-user-gesture-required',
                   '--disable-background-timer-throttling',
-                  '--disable-renderer-backgrounding'],
+                  '--disable-renderer-backgrounding',
+                  # Headless compositor vsync can cap presentation below the
+                  # source rate. The product never applies these test flags.
+                  '--disable-frame-rate-limit', '--disable-gpu-vsync'],
         )
 
     @classmethod

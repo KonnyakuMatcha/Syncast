@@ -495,6 +495,38 @@ class LiveHandler(BaseHTTPRequestHandler):
         except PermissionError as error:
             self.send_json({"error": str(error)}, HTTPStatus.UNAUTHORIZED)
             return
+        if query.get("stream") == ["1"]:
+            self.send_response(HTTPStatus.OK)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Cache-Control", "no-store, no-transform")
+            self.send_header("X-Accel-Buffering", "no")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+            self.connection.settimeout(15)
+            deadline, authenticate_at = time.monotonic() + 90, 0
+            while time.monotonic() < deadline:
+                if time.monotonic() >= authenticate_at:
+                    try:
+                        STORE.authenticate(room.code, client_id, self.bearer_token())
+                    except PermissionError:
+                        return
+                    authenticate_at = time.monotonic() + 2
+                with room.relay.condition:
+                    if not room.relay.active:
+                        return
+                    chunk = room.relay.read(generation, cursor)
+                    if chunk is None:
+                        room.relay.condition.wait(timeout=1)
+                        continue
+                metadata, body = chunk
+                generation, cursor = metadata["generation"], metadata["cursor"]
+                try:
+                    self.wfile.write(reliable.frame(metadata, body))
+                    self.wfile.flush()
+                except (OSError, TimeoutError):
+                    return
+            return
         deadline = time.monotonic() + 2
         chunk = None
         with room.relay.condition:

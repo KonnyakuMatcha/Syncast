@@ -6,10 +6,19 @@ import json
 import struct
 import threading
 import time
+import re
+import mp4
 
 MAX_SEGMENT = 4 * 1024 * 1024
 MAX_CACHE = 16 * 1024 * 1024
 CLUSTER = b"\x1f\x43\xb6\x75\x01\xff\xff\xff\xff\xff\xff\xff"
+MIMES = {"video/webm;codecs=vp8,opus", "video/webm;codecs=vp8",
+         "video/mp4;codecs=avc1.4d0028,mp4a.40.2", "video/mp4;codecs=avc1.4d002a,mp4a.40.2",
+         "video/mp4;codecs=avc1.4d0028", "video/mp4;codecs=avc1.4d002a"}
+
+
+def supported_mime(mime):
+    return mime in MIMES or re.fullmatch(r"video/mp4;codecs=avc1\.[0-9a-f]{6}(?:,mp4a\.40\.2)?", mime) is not None
 
 
 def _vint(data, offset, identifier=False):
@@ -118,11 +127,12 @@ class Relay:
         self.video_track = 1
         self.pending = {}
         self.retired = []
+        self.parse_position = 0
 
     def append(self, generation, sequence, mime, body):
         if not body or len(body) > MAX_SEGMENT or not generation or len(generation) > 80:
             raise ValueError("广播数据无效或过大")
-        if mime != "video/webm;codecs=vp8,opus":
+        if not supported_mime(mime):
             raise ValueError("广播编码不受支持")
         with self.condition:
             if generation != self.generation:
@@ -138,6 +148,7 @@ class Relay:
                 self.clusters.clear()
                 self.base = 0
                 self.pending = {}
+                self.parse_position = 0
             if sequence <= self.sequence:
                 return  # A repeated upload after a lost ACK must be harmless.
             if sequence > self.sequence + 32 or sum(len(x) for x in self.pending.values()) + len(body) > MAX_CACHE:
@@ -152,19 +163,30 @@ class Relay:
             body = b"".join(chunks)
             scan_from = max(0, len(self.data) - len(CLUSTER) + 1)
             self.data.extend(body)
-            position = self.data.find(CLUSTER, scan_from)
-            while position >= 0:
-                absolute = self.base + position
-                if not self.initialization and self.base == 0:
-                    if position > 64 * 1024:
-                        raise ValueError("广播初始化数据过大")
-                    self.initialization = bytes(self.data[:position])
-                    self.video_track = _video_track(self.initialization)
-                self.clusters.setdefault(absolute, None)
-                position = self.data.find(CLUSTER, position + len(CLUSTER))
-            for absolute, keyframe in list(self.clusters.items()):
-                if keyframe is None:
-                    self.clusters[absolute] = _starts_with_keyframe(self.data, absolute - self.base, self.video_track)
+            if mime.startswith("video/mp4"):
+                for kind, position, payload, end in mp4.boxes(self.data, self.parse_position - self.base):
+                    if kind == b"moof":
+                        if not self.initialization:
+                            if position > 64 * 1024:
+                                raise ValueError("广播初始化数据过大")
+                            self.initialization = bytes(self.data[:position])
+                            self.video_track = mp4.video_track(self.initialization)
+                        self.clusters[self.base + position] = mp4.keyframe(self.data, payload, end, self.video_track)
+                    self.parse_position = self.base + end
+            else:
+                position = self.data.find(CLUSTER, scan_from)
+                while position >= 0:
+                    absolute = self.base + position
+                    if not self.initialization and self.base == 0:
+                        if position > 64 * 1024:
+                            raise ValueError("广播初始化数据过大")
+                        self.initialization = bytes(self.data[:position])
+                        self.video_track = _video_track(self.initialization)
+                    self.clusters.setdefault(absolute, None)
+                    position = self.data.find(CLUSTER, position + len(CLUSTER))
+                for absolute, keyframe in list(self.clusters.items()):
+                    if keyframe is None:
+                        self.clusters[absolute] = _starts_with_keyframe(self.data, absolute - self.base, self.video_track)
             excess = len(self.data) - MAX_CACHE
             if excess > 0:
                 del self.data[:excess]

@@ -1,6 +1,7 @@
 "use strict";
 
 const RELIABLE_MIME = "video/webm;codecs=vp8,opus";
+const RELIABLE_H264 = "video/mp4;codecs=avc1.4d002a,mp4a.40.2";
 
 class ReliableBroadcast {
   constructor(isHost) {
@@ -13,6 +14,10 @@ class ReliableBroadcast {
     this.serial = 0;
     this.queue = [];
     this.uploading = 0;
+    this.rebuffering = true;
+    this.lastTrim = 0;
+    this.presented = 0;
+    this.seekCount = 0;
   }
 
   async publish(source, profile, maxMbps) {
@@ -24,7 +29,10 @@ class ReliableBroadcast {
     this.profile = profile;
     this.maxMbps = maxMbps;
     if (!source?.active) return;
-    if (!window.MediaRecorder?.isTypeSupported(RELIABLE_MIME)) throw new Error("可靠广播需要支持 WebM 的浏览器，请使用 Chrome 或选择 WebRTC");
+    const types = [RELIABLE_H264, RELIABLE_MIME].map((type) => source.getAudioTracks().length
+      ? type : type.replace(",mp4a.40.2", "").replace(",opus", ""));
+    const mime = types.find((type) => window.MediaRecorder?.isTypeSupported(type) && window.MediaSource?.isTypeSupported(type));
+    if (!mime) throw new Error("此浏览器不支持可靠广播，请使用 Chrome 或选择 WebRTC");
     const serial = this.serial;
     const tracks = source.getTracks().map((track) => track.clone());
     this.capture = new MediaStream(tracks);
@@ -36,10 +44,11 @@ class ReliableBroadcast {
     const generation = crypto.randomUUID();
     this.nextSequence = 0;
     this.queue = [];
-    const recorder = new MediaRecorder(this.capture, { mimeType: RELIABLE_MIME,
+    const recorder = new MediaRecorder(this.capture, { mimeType: mime,
       videoBitsPerSecond: (smooth ? 2 : profile === "balanced" ? 6 : maxMbps) * 1_000_000,
       audioBitsPerSecond: 192_000, videoKeyFrameIntervalDuration: 800 });
     this.recorder = recorder;
+    this.mime = recorder.mimeType;
     recorder.ondataavailable = ({ data }) => {
       if (!data.size || this.closed || serial !== this.serial) return;
       this.queue.push({ generation, data, serial });
@@ -66,7 +75,7 @@ class ReliableBroadcast {
         parts.push(next.data);
         size += next.data.size;
       }
-      const item = { ...first, sequence: this.nextSequence++, data: new Blob(parts, { type: RELIABLE_MIME }) };
+      const item = { ...first, sequence: this.nextSequence++, data: new Blob(parts, { type: this.mime }) };
       this.uploading++;
       (async () => {
         for (let attempt = 0; attempt < 3; attempt++) {
@@ -74,7 +83,7 @@ class ReliableBroadcast {
             const response = await fetch(appPath(`/api/rooms/${state.roomCode}/relay?clientId=${encodeURIComponent(state.clientId)}`), {
               method: "POST", body: item.data,
               signal: AbortSignal.any([this.controller.signal, AbortSignal.timeout(10000)]),
-              headers: { Authorization: `Bearer ${state.sessionToken}`, "Content-Type": RELIABLE_MIME,
+              headers: { Authorization: `Bearer ${state.sessionToken}`, "Content-Type": item.data.type,
                 "X-Broadcast-Generation": item.generation, "X-Broadcast-Sequence": String(item.sequence) },
             });
             if (!response.ok) throw new Error((await response.json()).error || "广播上传失败");
@@ -90,33 +99,41 @@ class ReliableBroadcast {
   }
 
   async watch() {
-    if (!window.MediaSource?.isTypeSupported(RELIABLE_MIME)) {
+    if (!window.MediaSource) {
       this.fail(new Error("此浏览器不支持可靠广播，请使用 Chrome 或让房主选择 WebRTC"));
       return;
     }
     while (!this.closed) {
       try {
-        const response = await fetch(appPath(`/api/rooms/${state.roomCode}/relay?once=1&clientId=${encodeURIComponent(state.clientId)}&generation=${encodeURIComponent(this.generation || "")}&cursor=${this.cursor || 0}`), {
+        const response = await fetch(appPath(`/api/rooms/${state.roomCode}/relay?stream=1&clientId=${encodeURIComponent(state.clientId)}&generation=${encodeURIComponent(this.generation || "")}&cursor=${this.cursor || 0}`), {
           signal: this.controller.signal, headers: { Authorization: `Bearer ${state.sessionToken}` },
         });
         if (!response.ok) throw new Error("广播接收失败");
-        const buffer = new Uint8Array(await response.arrayBuffer());
-        if (buffer.length < 4) throw new Error("广播数据格式无效");
-        const length = new DataView(buffer.buffer, buffer.byteOffset, 4).getUint32(0);
-        if (length > 4096 || buffer.length < 4 + length) throw new Error("广播数据格式无效");
-        const metadata = JSON.parse(new TextDecoder().decode(buffer.subarray(4, 4 + length)));
-        if (metadata.bytes < 0 || metadata.bytes > 5 * 1024 * 1024 || buffer.length !== 4 + length + metadata.bytes) throw new Error("广播数据大小无效");
-        if (!metadata.bytes) {
-          await new Promise((resolve) => setTimeout(resolve, 400));
-          continue;
+        const reader = response.body.getReader();
+        let buffer = new Uint8Array();
+        while (!this.closed) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          const combined = new Uint8Array(buffer.length + value.length);
+          combined.set(buffer); combined.set(value, buffer.length); buffer = combined;
+          while (buffer.length >= 4) {
+            const length = new DataView(buffer.buffer, buffer.byteOffset, 4).getUint32(0);
+            if (length > 4096) throw new Error("广播数据格式无效");
+            if (buffer.length < 4 + length) break;
+            const metadata = JSON.parse(new TextDecoder().decode(buffer.subarray(4, 4 + length)));
+            if (!Number.isInteger(metadata.bytes) || metadata.bytes < 0 || metadata.bytes > 5 * 1024 * 1024) throw new Error("广播数据大小无效");
+            if (buffer.length < 4 + length + metadata.bytes) break;
+            const payload = buffer.slice(4 + length, 4 + length + metadata.bytes);
+            buffer = buffer.slice(4 + length + metadata.bytes);
+            if (!metadata.bytes) continue;
+            if (metadata.reset) await this.resetPlayer(metadata.mime);
+            await this.append(payload);
+            this.generation = metadata.generation;
+            this.cursor = metadata.cursor;
+            this.bytes += metadata.bytes;
+            this.status = "connected";
+          }
         }
-        if (metadata.reset) await this.resetPlayer(metadata.mime);
-        await this.append(buffer.slice(4 + length));
-        this.generation = metadata.generation;
-        this.cursor = metadata.cursor;
-        this.bytes += metadata.bytes;
-        this.status = "connected";
-        continue;
       } catch (error) {
         if (this.closed) return;
         console.warn("Reliable broadcast receive retry", error);
@@ -127,20 +144,27 @@ class ReliableBroadcast {
   }
 
   async resetPlayer(mime) {
-    if (this.closed || mime !== RELIABLE_MIME) return;
+    if (this.closed) return;
+    if (!MediaSource.isTypeSupported(mime)) throw new Error("此浏览器不支持房主广播编码，请使用 Chrome 或选择 WebRTC");
     if (this.url) URL.revokeObjectURL(this.url);
     const mediaSource = new MediaSource();
     this.mediaSource = mediaSource;
     this.url = URL.createObjectURL(mediaSource);
+    this.rebuffering = true;
+    this.lastTrim = 0;
+    this.presented = 0;
     elements.stageVideo.srcObject = null;
     elements.stageVideo.src = this.url;
     elements.stageVideo.muted = !state.sharedSoundEnabled;
     await new Promise((resolve) => mediaSource.addEventListener("sourceopen", resolve, { once: true }));
     if (this.closed) return;
     this.buffer = mediaSource.addSourceBuffer(mime);
-    const frame = () => {
+    const frame = (now, metadata) => {
       if (this.closed || this.mediaSource !== mediaSource) return;
-      this.frames++;
+      // A busy main thread may skip callbacks even while the compositor
+      // presents frames. Count its actual presentations, not callback calls.
+      this.frames += Math.max(0, metadata.presentedFrames - this.presented);
+      this.presented = metadata.presentedFrames;
       elements.stageVideo.requestVideoFrameCallback?.(frame);
     };
     elements.stageVideo.requestVideoFrameCallback?.(frame);
@@ -161,14 +185,24 @@ class ReliableBroadcast {
     const video = elements.stageVideo;
     const end = buffer.buffered.end(buffer.buffered.length - 1);
     const start = buffer.buffered.start(buffer.buffered.length - 1);
-    if (video.currentTime < start || end - video.currentTime > 2.5) video.currentTime = Math.max(start, end - 1.0);
-    if (end - start > 0.8 && video.paused) {
-      if (!video.currentTime) video.currentTime = Math.max(start, end - 1.0);
+    const behind = end - video.currentTime;
+    // Frequent seeks discard good video frames and empty the decoder. Keep
+    // two seconds for recovery; seek only at startup or a severe backlog.
+    if (video.currentTime < start - 0.1 || behind > 8) {
+      video.currentTime = Math.max(start, end - 2);
+      this.seekCount++;
+    }
+    if (this.rebuffering && end - Math.max(start, video.currentTime) >= 2) {
+      if (!video.currentTime || video.currentTime < start) video.currentTime = Math.max(start, end - 2);
+      this.rebuffering = false;
       // play() may wait for more data. Continue feeding the decoder while it
       // waits instead of blocking the stream reader on that same data.
       video.play().catch(() => showToast("点击重新连接播放广播"));
     }
-    if (video.currentTime > 5) await update(() => buffer.remove(0, video.currentTime - 3));
+    if (video.currentTime > 10 && video.currentTime - this.lastTrim >= 2) {
+      this.lastTrim = video.currentTime;
+      await update(() => buffer.remove(0, video.currentTime - 8));
+    }
     showStage(true);
     renderConnectionStatus();
   }

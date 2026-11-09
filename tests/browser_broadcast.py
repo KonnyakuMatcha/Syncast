@@ -544,6 +544,63 @@ class BroadcastFunctionalTests(unittest.TestCase):
         self.assert_voices([host, guest, late])
         host.locator("#leave-button").click()
 
+    def test_reliable_sixty_frame_timeline_does_not_seek_on_normal_chunks(self):
+        host = self.page("Host", server_mode=True)
+        guest = self.page("Guest", host.locator("#room-code-label").inner_text())
+        host.locator("#broadcast-delivery").select_option("reliable")
+        host.locator("#share-button").click()
+        guest.wait_for_function("state.reliableClient?.frames > 180", timeout=30000)
+        mime = host.evaluate("state.reliableClient.mime")
+        if host.evaluate("MediaRecorder.isTypeSupported(RELIABLE_H264) && MediaSource.isTypeSupported(RELIABLE_H264)"):
+            self.assertTrue(mime.startswith("video/mp4;codecs=avc1"))
+        guest.evaluate("""() => {
+          window.frameCallbacks = 0;
+          const count = () => {
+            window.frameCallbacks++;
+            if (state.running) elements.stageVideo.requestVideoFrameCallback(count);
+          };
+          elements.stageVideo.requestVideoFrameCallback(count);
+        }""")
+        snapshot = """() => ({at:performance.now(), time:elements.stageVideo.currentTime,
+          presented:state.reliableClient.frames, callbacks:window.frameCallbacks,
+          decoded:elements.stageVideo.getVideoPlaybackQuality().totalVideoFrames,
+          seeks:state.reliableClient.seekCount})"""
+        before = guest.evaluate(snapshot)
+        guest.wait_for_timeout(8000)
+        after = guest.evaluate(snapshot)
+        seconds = (after["at"] - before["at"]) / 1000
+        decoded_fps = (after["decoded"] - before["decoded"]) / seconds
+        presented_fps = (after["presented"] - before["presented"]) / seconds
+        self.assertGreater(decoded_fps, 55, f"Decoded rate: {decoded_fps}")
+        self.assertGreater(presented_fps, 55, f"Presented rate: {presented_fps}")
+        self.assertEqual(after["seeks"], before["seeks"], "Normal chunk arrivals must not discard frames by seeking")
+        self.assertGreater(after["time"] - before["time"], seconds - 0.5)
+        self.assertLessEqual(after["callbacks"] - before["callbacks"], after["presented"] - before["presented"] + 2)
+        host.locator("#leave-button").click()
+
+    def test_reliable_video_without_shared_audio_and_vp8_fallback(self):
+        host = self.page("Host", server_mode=True)
+        guest = self.page("Guest", host.locator("#room-code-label").inner_text())
+        host.evaluate("""() => {
+          const capture = navigator.mediaDevices.getDisplayMedia;
+          navigator.mediaDevices.getDisplayMedia = async () => {
+            const stream = await capture();
+            for (const track of stream.getAudioTracks()) { stream.removeTrack(track); track.stop(); }
+            return stream;
+          };
+          const supported = MediaRecorder.isTypeSupported.bind(MediaRecorder);
+          MediaRecorder.isTypeSupported = type => !type.startsWith('video/mp4') && supported(type);
+        }""")
+        host.locator("#broadcast-delivery").select_option("reliable")
+        host.locator("#share-button").click()
+        guest.wait_for_function("state.reliableClient?.frames > 60", timeout=30000)
+        self.assertTrue(host.evaluate("state.reliableClient.mime.startsWith('video/webm;codecs=vp8')"))
+        self.assertFalse(host.evaluate("state.stageHasAudio"))
+        self.assertTrue(host.locator("#sound-button").is_disabled())
+        self.assertIsNone(guest.evaluate("elements.stageVideo.error"))
+        self.assert_voices([host, guest])
+        host.locator("#leave-button").click()
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
