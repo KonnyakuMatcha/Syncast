@@ -22,6 +22,7 @@ async function monitorConnections(sampleTime = Date.now()) {
   state.healthBusy = true;
   try {
     if (state.stageTransport === "server") {
+      state.reliableClient?.sampleStats();
       await state.broadcastClient?.sampleMediaStats();
       renderParticipants();
       return;
@@ -124,6 +125,12 @@ function renderConnectionStatus() {
   if (state.stageTransport === "server") elements.stageConnectionStatus.textContent = serverBroadcastStatus();
   elements.broadcastDiagnostics.hidden = state.stageTransport !== "server" || !state.stageExpected;
   elements.broadcastStats.textContent = SyncastBroadcastStats.format(state.broadcastClient?.mediaStats);
+  if (state.stageReliable && state.reliableClient) {
+    const relay = state.reliableClient;
+    elements.broadcastStats.textContent = `${state.isHost ? "本机 → VPS" : "VPS → 本机"} · 可靠传输\n`
+      + `共享音视频 ${relay.mbps?.toFixed(2) ?? "采样中"} Mbps`
+      + (state.isHost ? "" : ` · ${Math.round(relay.fps || 0)} 帧\n${elements.stageVideo.videoWidth}×${elements.stageVideo.videoHeight}`);
+  }
   const name = (id) => state.participants.get(id)?.name || "成员";
   const details = [];
   for (const id of voiceProblems) details.push(`语音 · ${name(id)}：${voiceProblem(id)}`);

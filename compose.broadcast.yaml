@@ -21,6 +21,10 @@ services:
         rtc:
           tcp_port: 7881
           udp_port: 7882
+          # Retain enough RTP packets for NACK recovery at high video bitrates.
+          # This is a retransmission cache, not an added playout delay.
+          packet_buffer_size_video: 4096
+          packet_buffer_size_audio: 1024
           use_external_ip: false
           node_ip: ${SYNCAST_PUBLIC_IP:?Set the VPS public IPv4 in SYNCAST_PUBLIC_IP}
         keys:

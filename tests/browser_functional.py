@@ -87,6 +87,7 @@ class BrowserFunctionalTests(unittest.TestCase):
         context = self.browser.new_context(permissions=['microphone'])
         self.contexts.append(context)
         context.add_init_script(DISPLAY_FIXTURE)
+        context.add_init_script("localStorage.setItem('syncast-broadcast-delivery', 'webrtc')")
         if server_mode:
             context.add_init_script("localStorage.setItem('syncast-topology-mode', 'server')")
         context.add_init_script("""

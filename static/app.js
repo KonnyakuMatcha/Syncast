@@ -41,6 +41,8 @@ const elements = {
   broadcastProfile: document.querySelector("#broadcast-profile"),
   broadcastBitrateControl: document.querySelector("#broadcast-bitrate-control"),
   broadcastBitrate: document.querySelector("#broadcast-bitrate"),
+  broadcastDeliveryControl: document.querySelector("#broadcast-delivery-control"),
+  broadcastDelivery: document.querySelector("#broadcast-delivery"),
   qualityControl: document.querySelector("#quality-control"),
   resolutionSelect: document.querySelector("#resolution-select"),
   frameRateSelect: document.querySelector("#frame-rate-select"),
@@ -89,10 +91,13 @@ const state = {
   broadcastAvailable: false,
   broadcastClient: null,
   stageTransport: "p2p",
+  broadcastDelivery: localStorage.getItem("syncast-broadcast-delivery") === "webrtc" ? "webrtc" : "reliable",
+  stageReliable: false,
+  reliableClient: null,
   broadcastProfile: ["smooth", "balanced"].includes(localStorage.getItem("syncast-broadcast-profile"))
     ? localStorage.getItem("syncast-broadcast-profile") : "quality",
-  broadcastBitrate: [20, 30, 40].includes(Number(localStorage.getItem("syncast-broadcast-bitrate")))
-    ? Number(localStorage.getItem("syncast-broadcast-bitrate")) : 20,
+  broadcastBitrate: [12, 20, 30, 40].includes(Number(localStorage.getItem("syncast-broadcast-bitrate")))
+    ? Number(localStorage.getItem("syncast-broadcast-bitrate")) : localStorage.getItem("syncast-broadcast-delivery") === "webrtc" ? 20 : 12,
   transportVersion: 0,
   stageQualities: new Map(),
   stageStream: null,
@@ -508,7 +513,8 @@ async function publishStageTopologyNow() {
   if (!state.isHost || !state.running) return;
   const enabled = state.topologyEnabled;
   const plan = currentTopologyPlan();
-  const source = { live: Boolean(state.display), hasAudio: Boolean(state.display?.getAudioTracks().length), audioEnabled: state.sharedSoundEnabled };
+  const source = { live: Boolean(state.display), hasAudio: Boolean(state.display?.getAudioTracks().length),
+    audioEnabled: state.sharedSoundEnabled, reliable: state.broadcastDelivery === "reliable" };
   const transportVersion = state.transportVersion;
   const topology = await request(`/api/rooms/${state.roomCode}/stage`, {
     method: "POST", body: JSON.stringify({ clientId: state.clientId, transportVersion, enabled, source, nodes: plan }),
@@ -527,6 +533,7 @@ async function applyStageTopology(assignment) {
     state.stageExpected = Boolean(assignment.source.live);
     state.stageHasAudio = Boolean(assignment.source.hasAudio);
     state.stageAudioEnabled = Boolean(assignment.source.audioEnabled);
+    state.stageReliable = Boolean(assignment.source.reliable);
   }
   if (state.stageTransport === "server") {
     state.stageParentId = "";
@@ -591,6 +598,10 @@ async function applyStageTopology(assignment) {
 }
 
 function updateMediaControls() {
+  elements.broadcastDeliveryControl.hidden = !state.isHost || state.stageTransport !== "server";
+  elements.broadcastDelivery.value = state.broadcastDelivery;
+  elements.qualityControl.hidden = state.isHost || (state.stageTransport === "server" && state.stageReliable);
+  elements.broadcastBitrateControl.querySelector("span").textContent = state.stageReliable ? "视频目标" : "视频上限";
   elements.broadcastProfileControl.hidden = !state.isHost || state.stageTransport !== "server";
   elements.broadcastProfile.value = state.broadcastProfile;
   elements.broadcastBitrateControl.hidden = !state.isHost || state.stageTransport !== "server" || state.broadcastProfile !== "quality";
@@ -598,9 +609,9 @@ function updateMediaControls() {
   document.querySelector("#topology-hint").textContent = state.stageTransport === "server"
     ? "画面、共享声音和语音均由服务器转发" : "语音通过成员直连传输";
   const server = state.stageTransport === "server";
-  elements.resolutionSelect.disabled = false;
-  elements.frameRateSelect.disabled = false;
-  elements.qualityControl.title = server ? "只影响此观众收到的画面" : "";
+  elements.resolutionSelect.disabled = server && state.stageReliable;
+  elements.frameRateSelect.disabled = server && state.stageReliable;
+  elements.qualityControl.title = server && state.stageReliable ? "可靠广播使用房主统一画质" : server ? "只影响此观众收到的画面" : "";
   elements.resolutionSelect.value = String(state.preferredResolution);
   elements.frameRateSelect.value = String(state.preferredFrameRate);
   const hostHasSilentShare = state.isHost && state.display && !state.display.getAudioTracks().length;
@@ -830,6 +841,7 @@ async function offerVoice(peerId) {
 }
 
 function requestStageQuality() {
+  if (state.stageTransport === "server" && state.stageReliable) return;
   if (state.stageTransport === "server") {
     state.broadcastClient?.setQuality(viewerQuality());
     return;
@@ -1393,6 +1405,7 @@ function toggleSharedSound() {
   if (state.isHost && state.display) {
     state.display.getAudioTracks().forEach((track) => { track.enabled = state.sharedSoundEnabled; });
     state.broadcastClient?.setAudioEnabled(state.sharedSoundEnabled);
+    state.reliableClient?.setAudioEnabled(state.sharedSoundEnabled);
     state.stageAudioEnabled = state.sharedSoundEnabled;
     for (const id of state.participants.keys()) {
       if (id !== state.clientId) sendSignal(id, { channel: "stage-audio-state", enabled: state.sharedSoundEnabled });
@@ -1472,8 +1485,13 @@ elements.broadcastProfile.addEventListener("change", () => {
   showToast(state.broadcastProfile === "smooth" ? "广播使用 720p30 流畅档"
     : state.broadcastProfile === "balanced" ? "广播使用 1080p60 均衡档" : "广播使用 1080p60 高清档");
 });
+elements.broadcastDelivery.addEventListener("change", async () => {
+  state.broadcastDelivery = elements.broadcastDelivery.value === "reliable" ? "reliable" : "webrtc";
+  localStorage.setItem("syncast-broadcast-delivery", state.broadcastDelivery);
+  await publishStageTopology().catch((error) => showToast(error.message));
+});
 elements.broadcastBitrate.addEventListener("change", () => {
-  state.broadcastBitrate = [20, 30, 40].includes(Number(elements.broadcastBitrate.value)) ? Number(elements.broadcastBitrate.value) : 20;
+  state.broadcastBitrate = [12, 20, 30, 40].includes(Number(elements.broadcastBitrate.value)) ? Number(elements.broadcastBitrate.value) : 20;
   localStorage.setItem("syncast-broadcast-bitrate", String(state.broadcastBitrate));
   updateServerBroadcast();
   showToast(`高清视频上限已设为 ${state.broadcastBitrate} Mbps`);

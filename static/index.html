@@ -118,6 +118,13 @@
             <option value="system">系统混音</option>
           </select>
         </label>
+        <label id="broadcast-delivery-control" class="quality-control" hidden>
+          <span>广播传输</span>
+          <select id="broadcast-delivery" aria-label="广播传输">
+            <option value="reliable" selected>可靠高清 · 缓冲约 1–2 秒</option>
+            <option value="webrtc">WebRTC · 低延迟</option>
+          </select>
+        </label>
         <label id="broadcast-profile-control" class="quality-control" hidden>
           <span>广播画质</span>
           <select id="broadcast-profile" aria-label="广播画质">
@@ -129,6 +136,7 @@
         <label id="broadcast-bitrate-control" class="quality-control" hidden>
           <span>视频上限</span>
           <select id="broadcast-bitrate" aria-label="高清视频码率上限">
+            <option value="12">12 Mbps</option>
             <option value="20">20 Mbps</option>
             <option value="30">30 Mbps</option>
             <option value="40">40 Mbps</option>
@@ -172,6 +180,7 @@
   <script src="connections.js"></script>
   <script src="broadcast-stats.js"></script>
   <script src="broadcast.js"></script>
+  <script src="reliable.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

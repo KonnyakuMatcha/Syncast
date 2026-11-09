@@ -376,6 +376,16 @@ class BroadcastFunctionalTests(unittest.TestCase):
         host.locator("#share-button").click()
         self.assert_receiving(guest)
         self.assert_voices([host, guest])
+        buffers = guest.evaluate("""() => {
+          const pubs = state.broadcastClient.room.remoteParticipants.get(state.hostId).trackPublications;
+          return [...pubs.values()].filter(p => p.track).map(p => ({source:p.source,
+            target:p.track.receiver.jitterBufferTarget, supported:'jitterBufferTarget' in p.track.receiver}));
+        }""")
+        for item in buffers:
+            if item["supported"] and item["source"] in ["screen_share", "screen_share_audio"]:
+                self.assertEqual(item["target"], 500)
+            if item["supported"] and item["source"] == "microphone":
+                self.assertNotEqual(item["target"], 500)
         guest.evaluate("""() => {
           window.playerReloads = 0;
           document.querySelector('#stage-video').addEventListener('loadstart', () => window.playerReloads++);
@@ -485,6 +495,53 @@ class BroadcastFunctionalTests(unittest.TestCase):
         self.assertEqual(caps, [5_000_000, 40_000_000])
         self.assertTrue(host.evaluate("window.keptSound === state.broadcastClient.tracks.find(t => t.kind === 'audio') && window.keptMic === state.broadcastClient.microphoneTrack"))
         self.assert_receiving(guest)
+        host.locator("#broadcast-bitrate").select_option("12")
+        host.wait_for_function("state.broadcastClient.maxMbps === 12")
+        caps = host.evaluate("state.broadcastClient.room.localParticipant.getTrackPublication('screen_share').track.sender.getParameters().encodings.map(e => e.maxBitrate)")
+        self.assertEqual(caps, [3_000_000, 12_000_000])
+        self.assert_receiving(guest)
+        host.locator("#leave-button").click()
+
+    def test_reliable_high_bitrate_late_join_and_switch_preserve_voice(self):
+        host = self.page("Host", server_mode=True)
+        code = host.locator("#room-code-label").inner_text()
+        guest = self.page("Guest", code)
+        host.locator("#broadcast-delivery").select_option("reliable")
+        host.locator("#broadcast-bitrate").select_option("12")
+        host.locator("#share-button").click()
+        guest.wait_for_function("state.reliableClient?.bytes > 10000 && !elements.stageVideo.paused && elements.stageVideo.readyState >= 3", timeout=30000)
+        guest.wait_for_function("state.reliableClient.frames > 30")
+        self.assert_voices([host, guest])
+        self.assertEqual(host.evaluate("state.broadcastClient.room.localParticipant.videoTrackPublications.size"), 0)
+        self.assertEqual(guest.evaluate("state.stagePeers.size + state.voicePeers.size"), 0)
+        self.assertTrue(guest.locator("#resolution-select").is_disabled())
+        guest.locator("#sound-button").click()
+        self.assertTrue(guest.evaluate("elements.stageVideo.muted"))
+        late = self.page("Late", code)
+        late.wait_for_function("state.reliableClient?.frames > 20 && !elements.stageVideo.paused", timeout=30000)
+        self.assertEqual(late.evaluate("elements.stageVideo.error"), None)
+        host.evaluate("window.reliableVoice = state.broadcastClient.room")
+        guest.evaluate("window.reliableFramesBefore = state.reliableClient.frames")
+        host.locator("#broadcast-bitrate").select_option("20")
+        host.wait_for_function("state.reliableClient.maxMbps === 20")
+        guest.wait_for_function("state.reliableClient.frames > window.reliableFramesBefore + 20", timeout=30000)
+        self.assertTrue(host.evaluate("window.reliableVoice === state.broadcastClient.room"))
+        guest.route("**/relay?**", lambda route: route.abort("failed"), times=1)
+        guest.evaluate("window.reliableFramesBefore = state.reliableClient.frames")
+        guest.wait_for_function("state.reliableClient.frames > window.reliableFramesBefore + 20", timeout=30000)
+        guest.evaluate("window.voiceRoom = state.broadcastClient.room")
+        guest.locator("#mic-button").click()
+        guest.wait_for_function("state.broadcastClient.microphonePublication.track.isMuted")
+        guest.locator("#mic-button").click()
+        host.locator("#broadcast-delivery").select_option("webrtc")
+        self.assert_receiving(guest)
+        self.assertTrue(guest.evaluate("window.voiceRoom === state.broadcastClient.room"))
+        self.assertTrue(guest.evaluate("elements.stageVideo.muted"))
+        host.locator("#broadcast-delivery").select_option("reliable")
+        guest.wait_for_function("state.reliableClient?.frames > 20 && !elements.stageVideo.paused", timeout=30000)
+        host.locator("#share-button").click()
+        guest.wait_for_function("!state.stageExpected && state.reliableClient === null")
+        self.assert_voices([host, guest, late])
         host.locator("#leave-button").click()
 
 

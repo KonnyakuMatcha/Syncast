@@ -4,6 +4,7 @@ import json
 import base64
 import hashlib
 import hmac
+import struct
 import sys
 import threading
 import time
@@ -192,6 +193,36 @@ class LiveServerTests(unittest.TestCase):
         self.assertEqual(snapshot["stageTopology"], topology)
         payload["transportVersion"] = 123
         self.assertEqual(self.request("POST", f"/api/rooms/{code}/stage", payload, host["sessionToken"])[0], 400)
+
+    def test_reliable_media_requires_session_and_only_host_can_upload(self):
+        import reliable
+        with patch.dict(server.os.environ, self.broadcast_env, clear=True):
+            _, host = self.request("POST", "/api/rooms", {"name": "Host", "mediaTransport": "server"})
+            code = host["roomCode"]
+            _, guest = self.request("POST", f"/api/rooms/{code}/join", {"name": "Guest"})
+            self.request("POST", f"/api/rooms/{code}/stage", {"clientId": host["clientId"], "transportVersion": 0,
+                "source": {"live": True, "reliable": True}, "nodes": {}}, host["sessionToken"])
+            body = b"init" + reliable.CLUSTER + b"\xe7\x81\x00\xa3\x85\x81\x00\x00\x80x"
+            for user, expected in [(guest, 401), (host, 200), (host, 200)]:
+                connection = HTTPConnection("127.0.0.1", self.port, timeout=3)
+                connection.request("POST", f"/api/rooms/{code}/relay?clientId={user['clientId']}", body=body,
+                    headers={"Authorization": f"Bearer {user['sessionToken']}", "Content-Type": "video/webm;codecs=vp8,opus",
+                             "X-Broadcast-Generation": "test-generation", "X-Broadcast-Sequence": "0"})
+                response = connection.getresponse()
+                self.assertEqual(response.status, expected)
+                response.read(); connection.close()
+            path = f"/api/rooms/{code}/relay?clientId={guest['clientId']}"
+            self.assertEqual(self.request("GET", path)[0], 401)
+            connection = HTTPConnection("127.0.0.1", self.port, timeout=3)
+            connection.request("GET", path, headers={"Authorization": f"Bearer {guest['sessionToken']}"})
+            response = connection.getresponse()
+            self.assertEqual(response.getheader("X-Accel-Buffering"), "no")
+            length = struct.unpack("!I", response.read(4))[0]
+            metadata = json.loads(response.read(length))
+            self.assertTrue(metadata["reset"])
+            self.assertEqual(response.read(metadata["bytes"]), body)
+            connection.close()
+            self.request("DELETE", f"/api/rooms/{code}?clientId={host['clientId']}", token=host["sessionToken"])
 
     def test_departed_members_cannot_get_new_broadcast_tokens(self):
         with patch.dict(server.os.environ, self.broadcast_env, clear=True):

@@ -65,6 +65,15 @@ class SyncastBroadcast {
       }
       if (this.closed || this.isHost || participant.identity !== this.hostId) return;
       if (![sdk.Track.Source.ScreenShare, sdk.Track.Source.ScreenShareAudio].includes(publication.source)) return;
+      // Leave time for NACK/RTX recovery on high-bitrate WAN streams. Voice
+      // tracks use their original low-latency buffer and return above.
+      const receiver = track.receiver;
+      try {
+        if (receiver && "jitterBufferTarget" in receiver) receiver.jitterBufferTarget = 500;
+        else if (receiver && "playoutDelayHint" in receiver) receiver.playoutDelayHint = 0.5;
+      } catch (error) {
+        console.warn("Unable to set shared media recovery buffer", error);
+      }
       for (const old of this.stream.getTracks().filter((item) => item.kind === track.kind)) this.stream.removeTrack(old);
       this.stream.addTrack(track.mediaStreamTrack);
       this.onStream(this.stream);
@@ -100,7 +109,7 @@ class SyncastBroadcast {
   setSource(source, profile = "quality", maxMbps = 20) {
     this.desiredSource = source;
     this.desiredProfile = ["smooth", "balanced"].includes(profile) ? profile : "quality";
-    this.desiredBitrate = this.desiredProfile === "quality" && [20, 30, 40].includes(maxMbps) ? maxMbps : 20;
+    this.desiredBitrate = this.desiredProfile === "quality" && [12, 20, 30, 40].includes(maxMbps) ? maxMbps : 20;
     if (!source) this.tracks.forEach((track) => track.stop());
     // Serializing publication also handles a stop or mode change during connect.
     this.pending = this.pending.catch(() => {}).then(async () => {
@@ -142,7 +151,8 @@ class SyncastBroadcast {
             ? { maxBitrate: 2_000_000, maxFramerate: 30 }
             : { maxBitrate: profile === "quality" ? maxMbps * 1_000_000 : 6_000_000, maxFramerate: 60 },
           screenShareSimulcastLayers: [
-            new sdk.VideoPreset({ width: 1280, height: 720, maxBitrate: profile === "quality" ? 5_000_000 : 2_000_000, maxFramerate: 60 }),
+            new sdk.VideoPreset({ width: 1280, height: 720,
+              maxBitrate: profile === "quality" ? (maxMbps === 12 ? 3_000_000 : 5_000_000) : 2_000_000, maxFramerate: 60 }),
           ],
         } : {
           source: sdk.Track.Source.ScreenShareAudio,
@@ -276,11 +286,14 @@ class SyncastBroadcast {
 }
 
 function closeServerBroadcast() {
+  state.reliableClient?.close();
+  state.reliableClient = null;
   state.broadcastClient?.close();
   state.broadcastClient = null;
 }
 
 function updateServerBroadcast() {
+  updateReliableBroadcast();
   if (!state.running || state.stageTransport !== "server") {
     closeServerBroadcast();
     if (!state.isHost) {
@@ -311,7 +324,7 @@ function updateServerBroadcast() {
         renderConnectionStatus();
       },
       onStream: (stream) => {
-        if (state.broadcastClient !== client || state.isHost) return;
+        if (state.broadcastClient !== client || state.isHost || state.stageReliable) return;
         state.stageStream = stream;
         const hasVideo = state.stageExpected && stream.getVideoTracks().some((track) => track.readyState === "live");
         if (hasVideo) {
@@ -333,8 +346,8 @@ function updateServerBroadcast() {
   if (!state.isHost) client.onStream(client.stream);
   const operation = Promise.all([
     client.setMicrophone(state.microphone, state.microphoneMuted),
-    state.isHost ? client.setSource(state.display, state.broadcastProfile, state.broadcastBitrate) : client.connect(),
-    state.isHost ? null : client.setQuality(viewerQuality()),
+    state.isHost ? client.setSource(state.stageReliable ? null : state.display, state.broadcastProfile, state.broadcastBitrate) : client.connect(),
+    state.isHost || state.stageReliable ? null : client.setQuality(viewerQuality()),
   ]);
   operation.catch((error) => {
     if (state.broadcastClient !== client || client.closed) return;
@@ -415,6 +428,11 @@ async function syncRoomState() {
 
 function serverBroadcastStatus() {
   if (!state.stageExpected) return "等待共享";
+  if (state.stageReliable) {
+    const reliable = state.reliableClient;
+    if (reliable?.status === "failed") return "可靠广播连接失败";
+    return reliable?.status === "connected" ? (state.isHost ? "可靠广播 · 上传中" : "可靠广播 · 播放中") : "可靠广播 · 缓冲中";
+  }
   const client = state.broadcastClient;
   if (["failed", "disconnected"].includes(client?.status)) return "广播连接失败 · 请重连";
   if (!client || client.status === "connecting") return "正在连接广播服务器";

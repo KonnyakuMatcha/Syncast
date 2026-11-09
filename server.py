@@ -21,6 +21,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import broadcast
+import reliable
 
 
 ROOT = Path(__file__).resolve().parent
@@ -71,6 +72,7 @@ class Room:
     topology_mode: str = "auto"
     stage_version: int = 0
     stage_topology: dict | None = None
+    relay: reliable.Relay = field(default_factory=reliable.Relay)
     created_at: float = field(default_factory=time.time)
     next_sequence: int = 1
     events: list[dict] = field(default_factory=list)
@@ -151,6 +153,7 @@ class RoomStore:
             broadcast.schedule_cleanup(room, None if was_host else client_id)
             room.publish("participant-left", {"id": client_id, "name": participant.name})
             if was_host:
+                room.relay.close()
                 room.publish("room-closed", {})
                 self.rooms.pop(room.code, None)
 
@@ -180,6 +183,7 @@ class RoomStore:
         for code in expired_rooms:
             room = self.rooms.pop(code, None)
             if room:
+                room.relay.close()
                 broadcast.schedule_cleanup(room)
                 room.publish("room-closed", {})
 
@@ -287,11 +291,32 @@ class LiveHandler(BaseHTTPRequestHandler):
             except PermissionError as error:
                 self.send_json({"error": str(error)}, HTTPStatus.UNAUTHORIZED)
             return
+        if parsed.path.startswith("/api/rooms/") and parsed.path.endswith("/relay"):
+            self.get_reliable_media(parsed)
+            return
         self.serve_static(parsed.path)
 
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         try:
+            parts = parsed.path.strip("/").split("/")
+            if len(parts) == 4 and parts[:2] == ["api", "rooms"] and parts[3] == "relay":
+                query = parse_qs(parsed.query)
+                room, participant = STORE.authenticate(parts[2], query.get("clientId", [""])[0], self.bearer_token())
+                if participant.client_id != room.host_id:
+                    raise PermissionError("只有房主可以发布广播")
+                if room.media_transport != "server" or not room.stage_topology or not room.stage_topology["source"].get("reliable"):
+                    raise ValueError("可靠广播尚未开始")
+                length = int(self.headers.get("Content-Length", "0"))
+                if length <= 0 or length > reliable.MAX_SEGMENT:
+                    raise ValueError("广播数据无效或过大")
+                body = self.rfile.read(length)
+                if len(body) != length:
+                    raise ValueError("广播数据不完整")
+                room.relay.append(self.headers.get("X-Broadcast-Generation", ""), int(self.headers.get("X-Broadcast-Sequence", "-1")),
+                                  self.headers.get("Content-Type", ""), body)
+                self.send_json({"ok": True})
+                return
             payload = self.read_json()
             if parsed.path == "/api/rooms":
                 transport = "server" if payload.get("mediaTransport") == "server" and broadcast.available() else "p2p"
@@ -355,6 +380,9 @@ class LiveHandler(BaseHTTPRequestHandler):
                                 "transportVersion": room.transport_version, "enabled": payload.get("enabled") is True,
                                 "source": {key: source.get(key) is True for key in ("live", "hasAudio", "audioEnabled")},
                                 "nodes": nodes}
+                    response["source"]["reliable"] = source.get("reliable") is True
+                    if not response["source"]["live"] or not response["source"]["reliable"]:
+                        room.relay.close()
                     room.stage_topology = response
                     room.publish("stage-topology", response)
                 self.send_json(response)
@@ -453,6 +481,38 @@ class LiveHandler(BaseHTTPRequestHandler):
             "iceServers": build_ice_servers(),
             "iceRefreshSeconds": 0,
         })
+
+    def get_reliable_media(self, parsed):
+        query = parse_qs(parsed.query)
+        client_id = query.get("clientId", [""])[0]
+        try:
+            room, _ = STORE.authenticate(parsed.path.split("/")[3], client_id, self.bearer_token())
+            generation = query.get("generation", [""])[0][:80]
+            cursor = max(0, int(query.get("cursor", ["0"])[0]))
+        except ValueError as error:
+            self.send_json({"error": str(error)}, HTTPStatus.BAD_REQUEST)
+            return
+        except PermissionError as error:
+            self.send_json({"error": str(error)}, HTTPStatus.UNAUTHORIZED)
+            return
+        deadline = time.monotonic() + 2
+        chunk = None
+        with room.relay.condition:
+            while room.relay.active:
+                chunk = room.relay.read(generation, cursor)
+                if chunk and (chunk[0]["reset"] or len(chunk[1]) >= 512 * 1024 or time.monotonic() >= deadline):
+                    break
+                if time.monotonic() >= deadline:
+                    break
+                room.relay.condition.wait(timeout=max(0, deadline - time.monotonic()))
+        body = reliable.frame(*chunk) if chunk else reliable.frame({"generation": generation, "cursor": cursor, "reset": False})
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "application/octet-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store, no-transform")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        self.wfile.write(body)
 
     def serve_static(self, request_path: str) -> None:
         relative = "index.html" if request_path in ("", "/") else request_path.lstrip("/")
