@@ -97,53 +97,65 @@ class SyncastBroadcast {
     if (this.closed) await room.disconnect(false);
   }
 
-  setSource(source) {
+  setSource(source, profile = "quality", maxMbps = 20) {
     this.desiredSource = source;
+    this.desiredProfile = ["smooth", "balanced"].includes(profile) ? profile : "quality";
+    this.desiredBitrate = this.desiredProfile === "quality" && [20, 30, 40].includes(maxMbps) ? maxMbps : 20;
     if (!source) this.tracks.forEach((track) => track.stop());
     // Serializing publication also handles a stop or mode change during connect.
     this.pending = this.pending.catch(() => {}).then(async () => {
       await this.connect();
       source = this.desiredSource;
-      if (this.closed || this.source === source) return;
+      const profile = this.desiredProfile;
+      const maxMbps = this.desiredBitrate;
+      if (this.closed || (this.source === source && this.profile === profile && this.maxMbps === maxMbps)) return;
+      const replaceSource = this.source !== source;
       const sdk = window.LivekitClient;
       for (const track of this.tracks) {
+        if (!replaceSource && track.kind === "audio") continue;
         await this.room.localParticipant.unpublishTrack(track, true);
         track.stop();
       }
-      this.tracks = [];
+      this.tracks = replaceSource ? [] : this.tracks.filter((track) => track.kind === "audio");
       this.source = null;
       this.onStatus(this.status);
       if (!source?.active || this.closed) return;
       for (const original of source.getTracks()) {
         if (original.readyState !== "live" || this.closed) continue;
+        if (!replaceSource && original.kind === "audio") continue;
         const track = original.clone();
         this.tracks.push(track);
         if (track.kind === "video") {
           track.contentHint = "motion";
-          await track.applyConstraints({ width: { max: 1920 }, height: { max: 1080 }, frameRate: { max: 60 } });
+          await track.applyConstraints(profile === "smooth"
+            ? { width: { max: 1280 }, height: { max: 720 }, frameRate: { max: 30 } }
+            : { width: { max: 1920 }, height: { max: 1080 }, frameRate: { max: 60 } });
           if (this.closed) return;
         }
         await this.room.localParticipant.publishTrack(track, track.kind === "video" ? {
           source: sdk.Track.Source.ScreenShare,
           videoCodec: "vp8",
           degradationPreference: "maintain-framerate",
-          simulcast: true,
+          simulcast: profile !== "smooth",
           backupCodec: false,
-          screenShareEncoding: { maxBitrate: 20_000_000, maxFramerate: 60 },
+          screenShareEncoding: profile === "smooth"
+            ? { maxBitrate: 2_000_000, maxFramerate: 30 }
+            : { maxBitrate: profile === "quality" ? maxMbps * 1_000_000 : 6_000_000, maxFramerate: 60 },
           screenShareSimulcastLayers: [
-            new sdk.VideoPreset({ width: 1280, height: 720, maxBitrate: 5_000_000, maxFramerate: 60 }),
-            new sdk.VideoPreset({ width: 1920, height: 1080, maxBitrate: 10_000_000, maxFramerate: 30 }),
+            new sdk.VideoPreset({ width: 1280, height: 720, maxBitrate: profile === "quality" ? 5_000_000 : 2_000_000, maxFramerate: 60 }),
           ],
         } : {
           source: sdk.Track.Source.ScreenShareAudio,
-          audioPreset: { maxBitrate: 192_000 },
+          audioPreset: { maxBitrate: 192_000, priority: "high" },
           forceStereo: true,
           dtx: false,
-          red: false,
+          red: true,
         });
       }
       if (this.closed) return;
       this.source = source;
+      this.profile = profile;
+      this.maxMbps = maxMbps;
       this.setStatus("connected");
     });
     return this.pending;
@@ -170,7 +182,7 @@ class SyncastBroadcast {
     const frameRate = Number(frameRateText) || 60;
     const quality = resolution === 720
       ? sdk.VideoQuality.LOW
-      : (frameRate === 60 ? sdk.VideoQuality.HIGH : sdk.VideoQuality.MEDIUM);
+      : sdk.VideoQuality.HIGH;
     publication.setVideoQuality(quality);
     publication.setVideoFPS?.(frameRate);
   }
@@ -321,7 +333,7 @@ function updateServerBroadcast() {
   if (!state.isHost) client.onStream(client.stream);
   const operation = Promise.all([
     client.setMicrophone(state.microphone, state.microphoneMuted),
-    state.isHost ? client.setSource(state.display) : client.connect(),
+    state.isHost ? client.setSource(state.display, state.broadcastProfile, state.broadcastBitrate) : client.connect(),
     state.isHost ? null : client.setQuality(viewerQuality()),
   ]);
   operation.catch((error) => {
@@ -351,10 +363,20 @@ function voiceProblem(id) {
 
 function applyMediaTransport(config) {
   const version = Number(config.transportVersion);
-  if (!Number.isSafeInteger(version) || version <= state.transportVersion) return;
+  if (!Number.isSafeInteger(version) || version < state.transportVersion) return false;
+  const changed = version > state.transportVersion;
   state.transportVersion = version;
+  if (state.isHost && ["auto", "direct", "relay", "server"].includes(config.topologyMode)
+      && (changed || state.topologyMode !== config.topologyMode)) {
+    state.topologyMode = config.topologyMode;
+    state.topologyEnabled = state.topologyMode === "relay";
+    state.autoRelay = { enabled: false, pressureSamples: 0 };
+    state.blockedStageEdges.clear();
+    localStorage.setItem("syncast-topology-mode", state.topologyMode);
+    elements.topologyMode.value = state.topologyMode;
+  }
   const transport = config.mediaTransport === "server" ? "server" : "p2p";
-  if (state.stageTransport === transport) return;
+  if (state.stageTransport === transport) return changed;
   state.stageTransport = transport;
   for (const id of [...state.voicePeers.keys()]) closePeer(state.voicePeers, id);
   for (const id of [...state.stagePeers.keys()]) closeStagePeer(id);
@@ -377,6 +399,18 @@ function applyMediaTransport(config) {
   }
   renderParticipants();
   updateMediaControls();
+  return changed;
+}
+
+async function syncRoomState() {
+  if (!state.running) return;
+  const config = await request(`/api/rooms/${state.roomCode}/state?clientId=${encodeURIComponent(state.clientId)}`);
+  if (!state.running || config.transportVersion < state.transportVersion) return;
+  applyMediaTransport(config);
+  if (state.isHost) await publishStageTopology();
+  else if (config.stageTopology) {
+    await applyStageTopology({ ...config.stageTopology, ...config.stageTopology.nodes?.[state.clientId] });
+  }
 }
 
 function serverBroadcastStatus() {
@@ -385,7 +419,8 @@ function serverBroadcastStatus() {
   if (["failed", "disconnected"].includes(client?.status)) return "广播连接失败 · 请重连";
   if (!client || client.status === "connecting") return "正在连接广播服务器";
   if (client.status !== "connected") return "广播重连中";
-  if (state.isHost) return client.source ? "服务器广播 · 上传 1 路 · 多层" : "正在发布画面";
+  if (state.isHost) return client.source ? `服务器广播 · ${client.profile === "smooth" ? "流畅 720p30"
+    : client.profile === "balanced" ? "均衡 1080p60" : "高清 1080p60"}` : "正在发布画面";
   if (!state.stageStream?.getVideoTracks().length) return "等待广播画面";
   return elements.stageVideo.paused ? "等待播放" : `服务器广播 · 播放中 · ${formatViewerQuality()}`;
 }

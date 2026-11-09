@@ -249,7 +249,7 @@ class BrowserFunctionalTests(unittest.TestCase):
           renderConnectionStatus();
         }""")
         guest.locator('#reconnect-button').click()
-        self.assertFalse(guest.evaluate('window.testFrozenPeer.recoveryExhausted'))
+        guest.wait_for_function('!window.testFrozenPeer.recoveryExhausted')
         self.wait_async(guest, """async () => {
           await monitorConnections();
           return !window.testFrozenPeer.mediaStalled;

@@ -11,6 +11,7 @@ import unittest
 from http.client import HTTPConnection
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import urlparse
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -63,6 +64,33 @@ class RoomLifecycleTests(unittest.TestCase):
         self.assertEqual(self.room.events[-1]['type'], 'room-closed')
         with self.assertRaises(PermissionError):
             self.store.authenticate(self.room.code, self.guest.client_id, self.guest.session_token)
+
+    def test_join_cursor_does_not_skip_signals_published_before_response(self):
+        cursor = self.guest.initial_sequence
+        self.room.publish("signal", {"from": self.host.client_id, "data": {"channel": "voice"}}, self.guest.client_id)
+        with patch.object(server, "STORE", self.store):
+            handler = object.__new__(server.LiveHandler)
+            response = handler.room_response(self.room, self.guest)
+        self.assertEqual(response["sequence"], cursor)
+        self.assertGreater(self.room.events[-1]["sequence"], response["sequence"])
+
+    def test_poll_rescans_events_after_wait_expires(self):
+        handler = object.__new__(server.LiveHandler)
+        handler.bearer_token = lambda: self.guest.session_token
+        replies = []
+        handler.send_json = lambda payload: replies.append(payload)
+        since = self.room.next_sequence - 1
+        clock = [time.time()]
+
+        def expire(timeout):
+            clock[0] += timeout + 0.01
+            self.room.publish("signal", {"from": self.host.client_id, "data": {"channel": "stage-stop"}}, self.guest.client_id)
+
+        with patch.object(server, "STORE", self.store), patch.object(server.time, "time", lambda: clock[0]), \
+                patch.object(self.room.condition, "wait", expire):
+            handler.get_events(urlparse(f"/api/rooms/{self.room.code}/events?clientId={self.guest.client_id}&since={since}"))
+        self.assertEqual(len(replies[0]["events"]), 1)
+        self.assertEqual(replies[0]["events"][0]["sequence"], replies[0]["sequence"])
 
 
 class LiveServerTests(unittest.TestCase):
@@ -127,7 +155,7 @@ class LiveServerTests(unittest.TestCase):
                 self.assertEqual(status, 401)
             status, data = self.request("POST", endpoint, {"clientId": host["clientId"], "mediaTransport": "p2p"}, host["sessionToken"])
             self.assertEqual(status, 200)
-            self.assertEqual(data, {"mediaTransport": "p2p", "transportVersion": 1})
+            self.assertEqual(data, {"mediaTransport": "p2p", "transportVersion": 1, "topologyMode": "direct"})
             _, events = self.request("GET", f"/api/rooms/{code}/events?clientId={guest['clientId']}&since={guest['sequence']}", token=guest["sessionToken"])
             self.assertEqual(events["events"][-1]["type"], "media-transport")
             self.assertEqual(events["events"][-1]["payload"], data)
@@ -144,6 +172,26 @@ class LiveServerTests(unittest.TestCase):
             status, _ = self.request("POST", f"/api/rooms/{host['roomCode']}/transport",
                                      {"clientId": host["clientId"], "mediaTransport": "server"}, host["sessionToken"])
             self.assertEqual(status, 400)
+
+    def test_stage_snapshot_is_authorized_versioned_and_recoverable(self):
+        _, host = self.request("POST", "/api/rooms", {"name": "Host"})
+        code = host["roomCode"]
+        _, guest = self.request("POST", f"/api/rooms/{code}/join", {"name": "Guest"})
+        payload = {"clientId": guest["clientId"], "transportVersion": 0,
+                   "source": {"live": True, "hasAudio": True, "audioEnabled": True}, "nodes": {}}
+        status, _ = self.request("POST", f"/api/rooms/{code}/stage", payload, guest["sessionToken"])
+        self.assertEqual(status, 401)
+        payload["clientId"] = host["clientId"]
+        status, topology = self.request("POST", f"/api/rooms/{code}/stage", payload, host["sessionToken"])
+        self.assertEqual(status, 200)
+        self.assertEqual(topology["version"], 1)
+        path = f"/api/rooms/{code}/state?clientId={guest['clientId']}"
+        self.assertEqual(self.request("GET", path)[0], 401)
+        status, snapshot = self.request("GET", path, token=guest["sessionToken"])
+        self.assertEqual(status, 200)
+        self.assertEqual(snapshot["stageTopology"], topology)
+        payload["transportVersion"] = 123
+        self.assertEqual(self.request("POST", f"/api/rooms/{code}/stage", payload, host["sessionToken"])[0], 400)
 
     def test_departed_members_cannot_get_new_broadcast_tokens(self):
         with patch.dict(server.os.environ, self.broadcast_env, clear=True):
@@ -243,8 +291,8 @@ class LiveServerTests(unittest.TestCase):
             token=guest["sessionToken"],
         )
         self.assertEqual(status, 200)
-        self.assertEqual(events["events"][0]["type"], "signal")
-        self.assertEqual(events["events"][0]["payload"]["from"], host["clientId"])
+        signals = [event for event in events["events"] if event["type"] == "signal"]
+        self.assertEqual(signals[0]["payload"]["from"], host["clientId"])
 
     def test_unknown_room_is_rejected(self) -> None:
         status, payload = self.request("POST", "/api/rooms/ABC234/join", {"name": "Guest"})

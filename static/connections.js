@@ -138,6 +138,7 @@ async function reconnectMedia() {
   state.reconnecting = true;
   renderConnectionStatus();
   try {
+    await syncRoomState().catch((error) => console.warn("Unable to refresh room state before media reconnect", error));
     if (state.stageTransport === "server") {
       closeServerBroadcast();
       updateServerBroadcast();

@@ -37,6 +37,10 @@ const elements = {
   share: document.querySelector("#share-button"),
   windowAudioControl: document.querySelector("#window-audio-control"),
   windowAudioSelect: document.querySelector("#window-audio-select"),
+  broadcastProfileControl: document.querySelector("#broadcast-profile-control"),
+  broadcastProfile: document.querySelector("#broadcast-profile"),
+  broadcastBitrateControl: document.querySelector("#broadcast-bitrate-control"),
+  broadcastBitrate: document.querySelector("#broadcast-bitrate"),
   qualityControl: document.querySelector("#quality-control"),
   resolutionSelect: document.querySelector("#resolution-select"),
   frameRateSelect: document.querySelector("#frame-rate-select"),
@@ -85,6 +89,10 @@ const state = {
   broadcastAvailable: false,
   broadcastClient: null,
   stageTransport: "p2p",
+  broadcastProfile: ["smooth", "balanced"].includes(localStorage.getItem("syncast-broadcast-profile"))
+    ? localStorage.getItem("syncast-broadcast-profile") : "quality",
+  broadcastBitrate: [20, 30, 40].includes(Number(localStorage.getItem("syncast-broadcast-bitrate")))
+    ? Number(localStorage.getItem("syncast-broadcast-bitrate")) : 20,
   transportVersion: 0,
   stageQualities: new Map(),
   stageStream: null,
@@ -197,7 +205,7 @@ async function enterRoom(mode) {
     const session = await request(path, {
       method: "POST",
       body: JSON.stringify({ name, relayCapable: canRelayStage(),
-        mediaTransport: state.topologyMode === "server" ? "server" : "p2p" }),
+        mediaTransport: state.topologyMode === "server" ? "server" : "p2p", topologyMode: state.topologyMode }),
     });
     state.microphoneMuted = microphoneDenied;
     startSession(session, name);
@@ -226,6 +234,7 @@ function startSession(session, name) {
   if (!state.broadcastAvailable && state.topologyMode === "server") state.topologyMode = "auto";
   state.stageTransport = session.mediaTransport === "server" ? "server" : "p2p";
   state.transportVersion = Number(session.transportVersion) || 0;
+  if (state.isHost && session.topologyMode === "server") state.topologyMode = "server";
   const serverOption = elements.topologyMode.querySelector('[value="server"]');
   serverOption.disabled = !state.broadcastAvailable;
   serverOption.textContent = state.broadcastAvailable ? "服务器广播" : "服务器广播（未启用）";
@@ -264,6 +273,7 @@ function startSession(session, name) {
   scheduleIceRefresh();
   broadcastMemberState();
   if (state.stageTransport === "server") updateServerBroadcast();
+  syncRoomState().catch((error) => console.warn("Unable to synchronize room state", error));
   state.topologyMonitorTimer = setInterval(monitorTopology, 5000);
   state.healthTimer = setInterval(monitorConnections, 5000);
 }
@@ -497,30 +507,19 @@ function publishStageTopology() {
 async function publishStageTopologyNow() {
   if (!state.isHost || !state.running) return;
   const enabled = state.topologyEnabled;
-  const transport = state.stageTransport;
   const plan = currentTopologyPlan();
-  const version = ++state.topologyVersion;
   const source = { live: Boolean(state.display), hasAudio: Boolean(state.display?.getAudioTracks().length), audioEnabled: state.sharedSoundEnabled };
   const transportVersion = state.transportVersion;
-  await applyStageTopology({ version, enabled, transport, transportVersion, source, nodes: plan, ...plan[state.clientId] });
-  await Promise.all([...state.participants.keys()]
-    .filter((id) => id !== state.clientId)
-    .map((id) => sendSignal(id, {
-      channel: "stage-topology",
-      transport,
-      transportVersion,
-      version,
-      enabled,
-      source,
-      nodes: plan,
-      ...plan[id],
-    })));
+  const topology = await request(`/api/rooms/${state.roomCode}/stage`, {
+    method: "POST", body: JSON.stringify({ clientId: state.clientId, transportVersion, enabled, source, nodes: plan }),
+  });
+  await applyStageTopology({ ...topology, ...topology.nodes?.[state.clientId] });
 }
 
 async function applyStageTopology(assignment) {
   if (assignment.transportVersion !== undefined && assignment.transportVersion !== state.transportVersion) return;
   const version = Number(assignment.version) || 0;
-  if (!state.isHost && version <= state.topologyVersion) return;
+  if (version <= state.topologyVersion) return;
   state.topologyVersion = version;
   state.topologyEnabled = Boolean(assignment.enabled);
   state.topologyPlanEnabled = state.topologyEnabled;
@@ -592,6 +591,10 @@ async function applyStageTopology(assignment) {
 }
 
 function updateMediaControls() {
+  elements.broadcastProfileControl.hidden = !state.isHost || state.stageTransport !== "server";
+  elements.broadcastProfile.value = state.broadcastProfile;
+  elements.broadcastBitrateControl.hidden = !state.isHost || state.stageTransport !== "server" || state.broadcastProfile !== "quality";
+  elements.broadcastBitrate.value = String(state.broadcastBitrate);
   document.querySelector("#topology-hint").textContent = state.stageTransport === "server"
     ? "画面、共享声音和语音均由服务器转发" : "语音通过成员直连传输";
   const server = state.stageTransport === "server";
@@ -1157,7 +1160,12 @@ async function handleSignal(payload) {
 async function handleEvent(event) {
   const payload = event.payload;
   if (event.type === "media-transport") {
-    applyMediaTransport(payload);
+    const changed = applyMediaTransport(payload);
+    if (changed && state.isHost) await publishStageTopology();
+    return;
+  }
+  if (event.type === "stage-topology") {
+    await applyStageTopology({ ...payload, ...payload.nodes?.[state.clientId] });
     return;
   }
   if (event.type === "participant-joined") {
@@ -1206,7 +1214,9 @@ async function pollEvents() {
   while (state.running) {
     try {
       const result = await request(`/api/rooms/${state.roomCode}/events?clientId=${encodeURIComponent(state.clientId)}&since=${state.sequence}`);
+      const recoveringSignal = !state.signalingOnline;
       setNetworkState(true);
+      if (recoveringSignal) await syncRoomState();
       retryDelay = 700;
       for (const event of result.events) {
         state.sequence = Math.max(state.sequence, event.sequence);
@@ -1433,7 +1443,7 @@ elements.topologyMode.addEventListener("change", async () => {
   try {
     const config = await request(`/api/rooms/${state.roomCode}/transport`, {
       method: "POST",
-      body: JSON.stringify({ clientId: state.clientId, mediaTransport: requestedMode === "server" ? "server" : "p2p" }),
+      body: JSON.stringify({ clientId: state.clientId, mediaTransport: requestedMode === "server" ? "server" : "p2p", topologyMode: requestedMode }),
     });
     applyMediaTransport(config);
     state.topologyMode = requestedMode;
@@ -1447,11 +1457,26 @@ elements.topologyMode.addEventListener("change", async () => {
       : state.topologyMode === "server" ? "画面与语音均已切换到服务器"
       : (state.topologyEnabled ? "已开启中转，节省房主上传" : "已恢复房主直连"));
   } catch (error) {
+    await syncRoomState().catch(() => {});
     elements.topologyMode.value = state.topologyMode;
     showToast(error.message);
   } finally {
     elements.topologyMode.disabled = false;
   }
+});
+elements.broadcastProfile.addEventListener("change", () => {
+  state.broadcastProfile = ["smooth", "balanced"].includes(elements.broadcastProfile.value) ? elements.broadcastProfile.value : "quality";
+  localStorage.setItem("syncast-broadcast-profile", state.broadcastProfile);
+  updateMediaControls();
+  updateServerBroadcast();
+  showToast(state.broadcastProfile === "smooth" ? "广播使用 720p30 流畅档"
+    : state.broadcastProfile === "balanced" ? "广播使用 1080p60 均衡档" : "广播使用 1080p60 高清档");
+});
+elements.broadcastBitrate.addEventListener("change", () => {
+  state.broadcastBitrate = [20, 30, 40].includes(Number(elements.broadcastBitrate.value)) ? Number(elements.broadcastBitrate.value) : 20;
+  localStorage.setItem("syncast-broadcast-bitrate", String(state.broadcastBitrate));
+  updateServerBroadcast();
+  showToast(`高清视频上限已设为 ${state.broadcastBitrate} Mbps`);
 });
 elements.windowAudioSelect.addEventListener("change", () => {
   state.windowAudioMode = elements.windowAudioSelect.value === "system" ? "system" : "isolated";

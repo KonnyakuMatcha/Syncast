@@ -16,7 +16,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer as BaseThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -49,6 +49,7 @@ class Participant:
     session_token: str = field(default_factory=lambda: secrets.token_urlsafe(32))
     joined_at: float = field(default_factory=time.time)
     last_seen: float = field(default_factory=time.time)
+    initial_sequence: int = 0
 
     def public(self, host_id: str) -> dict:
         return {
@@ -67,6 +68,9 @@ class Room:
     broadcast_used: bool = False
     media_transport: str = "p2p"
     transport_version: int = 0
+    topology_mode: str = "auto"
+    stage_version: int = 0
+    stage_topology: dict | None = None
     created_at: float = field(default_factory=time.time)
     next_sequence: int = 1
     events: list[dict] = field(default_factory=list)
@@ -106,6 +110,7 @@ class RoomStore:
             participant = Participant(self._new_client_id(), name, relay_capable)
             room = Room(code, participant.client_id, {participant.client_id: participant})
             room.media_transport = media_transport
+            room.topology_mode = "server" if media_transport == "server" else "auto"
             self.rooms[code] = room
             return room, participant
 
@@ -118,6 +123,7 @@ class RoomStore:
             if len(room.participants) >= MAX_PARTICIPANTS:
                 raise ValueError("房间人数已满")
             participant = Participant(self._new_client_id(), name, relay_capable)
+            participant.initial_sequence = room.next_sequence - 1
             room.participants[participant.client_id] = participant
             room.publish("participant-joined", participant.public(room.host_id))
             return room, participant
@@ -181,6 +187,12 @@ class RoomStore:
 STORE = RoomStore()
 
 
+class ThreadingHTTPServer(BaseThreadingHTTPServer):
+    # Six browsers can load scripts, negotiate media and long-poll together.
+    # The stdlib's five pending connections are too few for these bursts.
+    request_queue_size = 128
+
+
 class LiveHandler(BaseHTTPRequestHandler):
     server_version = "Syncast/1.1"
 
@@ -231,12 +243,13 @@ class LiveHandler(BaseHTTPRequestHandler):
                 "sessionToken": participant.session_token,
                 "hostId": room.host_id,
                 "isHost": participant.client_id == room.host_id,
-                "sequence": room.next_sequence - 1,
+                "sequence": participant.initial_sequence,
                 "iceServers": build_ice_servers(),
                 "iceRefreshSeconds": 0,
                 "broadcastAvailable": broadcast.available(),
                 "mediaTransport": room.media_transport,
                 "transportVersion": room.transport_version,
+                "topologyMode": room.topology_mode,
                 "participants": [item.public(room.host_id) for item in room.participants.values()],
             }
 
@@ -263,6 +276,17 @@ class LiveHandler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/api/rooms/") and parsed.path.endswith("/ice"):
             self.get_ice_config(parsed)
             return
+        if parsed.path.startswith("/api/rooms/") and parsed.path.endswith("/state"):
+            query = parse_qs(parsed.query)
+            try:
+                with STORE.lock:
+                    room, _ = STORE.authenticate(parsed.path.split("/")[3], query.get("clientId", [""])[0], self.bearer_token())
+                    snapshot = {"mediaTransport": room.media_transport, "transportVersion": room.transport_version,
+                                "topologyMode": room.topology_mode, "stageTopology": room.stage_topology}
+                self.send_json(snapshot)
+            except PermissionError as error:
+                self.send_json({"error": str(error)}, HTTPStatus.UNAUTHORIZED)
+            return
         self.serve_static(parsed.path)
 
     def do_POST(self) -> None:
@@ -276,6 +300,8 @@ class LiveHandler(BaseHTTPRequestHandler):
                     self.relay_capable(payload.get("relayCapable")),
                     transport,
                 )
+                if transport == "p2p" and payload.get("topologyMode") in ("auto", "direct", "relay"):
+                    room.topology_mode = payload["topologyMode"]
                 self.send_json(self.room_response(room, participant), HTTPStatus.CREATED)
                 return
             parts = parsed.path.strip("/").split("/")
@@ -299,13 +325,39 @@ class LiveHandler(BaseHTTPRequestHandler):
                         raise ValueError("连接模式无效")
                     if transport == "server" and not broadcast.available():
                         raise ValueError("此服务器尚未启用服务器广播")
-                    if room.media_transport != transport:
+                    mode = payload.get("topologyMode", "server" if transport == "server" else "direct")
+                    if mode not in ("auto", "direct", "relay", "server") or (mode == "server") != (transport == "server"):
+                        raise ValueError("连接方式无效")
+                    if room.media_transport != transport or room.topology_mode != mode:
                         room.media_transport = transport
+                        room.topology_mode = mode
                         room.transport_version += 1
                         room.publish("media-transport", {
                             "mediaTransport": transport, "transportVersion": room.transport_version,
+                            "topologyMode": mode,
                         })
-                    self.send_json({"mediaTransport": room.media_transport, "transportVersion": room.transport_version})
+                    response = {"mediaTransport": room.media_transport, "transportVersion": room.transport_version,
+                                "topologyMode": room.topology_mode}
+                self.send_json(response)
+                return
+            if len(parts) == 4 and parts[:2] == ["api", "rooms"] and parts[3] == "stage":
+                with STORE.lock:
+                    room, participant = STORE.authenticate(parts[2], str(payload.get("clientId", "")), self.bearer_token())
+                    if participant.client_id != room.host_id:
+                        raise PermissionError("只有房主可以更新直播状态")
+                    if payload.get("transportVersion") != room.transport_version:
+                        raise ValueError("连接模式已改变，请重新同步")
+                    source, nodes = payload.get("source"), payload.get("nodes")
+                    if not isinstance(source, dict) or not isinstance(nodes, dict):
+                        raise ValueError("直播状态无效")
+                    room.stage_version += 1
+                    response = {"version": room.stage_version, "transport": room.media_transport,
+                                "transportVersion": room.transport_version, "enabled": payload.get("enabled") is True,
+                                "source": {key: source.get(key) is True for key in ("live", "hasAudio", "audioEnabled")},
+                                "nodes": nodes}
+                    room.stage_topology = response
+                    room.publish("stage-topology", response)
+                self.send_json(response)
                 return
             if len(parts) == 4 and parts[:2] == ["api", "rooms"] and parts[3] == "signal":
                 room, participant = STORE.authenticate(
@@ -372,16 +424,17 @@ class LiveHandler(BaseHTTPRequestHandler):
         events: list[dict] = []
         cursor = since
         with room.condition:
-            while time.time() < deadline:
+            while True:
                 events = [
                     {key: value for key, value in event.items() if key != "recipient"}
                     for event in room.events
                     if event["sequence"] > since
                     and (event["recipient"] is None or event["recipient"] == client_id)
                 ]
-                if events:
+                remaining = deadline - time.time()
+                if events or remaining <= 0:
                     break
-                room.condition.wait(timeout=max(0, deadline - time.time()))
+                room.condition.wait(timeout=remaining)
             # Capture the cursor while holding the same lock used by publish().
             # Every event at or below this value was included in the filter above.
             cursor = room.next_sequence - 1

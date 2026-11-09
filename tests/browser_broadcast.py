@@ -111,7 +111,7 @@ class BroadcastFunctionalTests(unittest.TestCase):
     def assert_receiving(self, page):
         page.wait_for_function("state.broadcastClient?.room?.state === 'connected'", timeout=30000)
         stats = """async () => {
-          const remote = state.broadcastClient.room.remoteParticipants.get(state.hostId);
+          const remote = state.broadcastClient?.room?.remoteParticipants.get(state.hostId);
           let frames = 0, audio = 0;
           for (const pub of remote?.trackPublications.values() || []) {
             if (!['screen_share', 'screen_share_audio'].includes(pub.source)) continue;
@@ -122,12 +122,15 @@ class BroadcastFunctionalTests(unittest.TestCase):
               if (report.kind === 'audio') audio += report.bytesReceived || 0;
             }
           }
-          return {frames, audio};
+          return {frames, audio, client: remote?.sid};
         }"""
         baseline = page.evaluate(stats)
         deadline = time.monotonic() + 25
         while time.monotonic() < deadline:
             current = page.evaluate(stats)
+            if current["client"] != baseline["client"]:
+                baseline = current
+                continue
             if current["frames"] > baseline["frames"] + 2 and current["audio"] > baseline["audio"]:
                 self.assertEqual(page.evaluate("state.stagePeers.size"), 0)
                 self.assertFalse(page.locator("#resolution-select").is_disabled())
@@ -175,6 +178,7 @@ class BroadcastFunctionalTests(unittest.TestCase):
 
     def test_single_upload_multi_viewer_switch_restart_reconnect_and_close(self):
         host = self.page("Host")
+        host.evaluate("state.broadcastProfile = 'balanced'")
         code = host.locator("#room-code-label").inner_text()
         first = self.page("First", code)
         host.locator("#share-button").click()
@@ -185,7 +189,7 @@ class BroadcastFunctionalTests(unittest.TestCase):
         guests = [first, self.page("Second", code), self.page("Third", code)]
         for guest in guests[1:]:
             self.assert_receiving(guest)
-        expected_levels = [("720", "30", "LOW"), ("1080", "30", "MEDIUM"), ("1080", "60", "HIGH")]
+        expected_levels = [("720", "30", "LOW"), ("1080", "30", "HIGH"), ("1080", "60", "HIGH")]
         for guest, (resolution, frame_rate, level) in zip(guests, expected_levels):
             guest.locator("#resolution-select").select_option(resolution)
             guest.locator("#frame-rate-select").select_option(frame_rate)
@@ -236,15 +240,14 @@ class BroadcastFunctionalTests(unittest.TestCase):
         }""")
         self.assertEqual(stats["tracks"], 3)
         self.assertEqual(stats["peers"], 0)
-        self.assertEqual(stats["encodings"], 3)
+        self.assertEqual(stats["encodings"], 2)
         self.assertEqual(stats["degradation"], "maintain-framerate")
         self.assertEqual(stats["encodingDetails"], [
-            {"rid": "q", "maxBitrate": 5_000_000, "maxFramerate": 60, "scaleResolutionDownBy": 1.5},
-            {"rid": "h", "maxBitrate": 10_000_000, "maxFramerate": 30, "scaleResolutionDownBy": 1},
-            {"rid": "f", "maxBitrate": 20_000_000, "maxFramerate": 60, "scaleResolutionDownBy": 1},
+            {"rid": "q", "maxBitrate": 2_000_000, "maxFramerate": 60, "scaleResolutionDownBy": 1.5},
+            {"rid": "h", "maxBitrate": 6_000_000, "maxFramerate": 60, "scaleResolutionDownBy": 1},
         ])
         self.assertGreaterEqual(stats["streams"], 1)
-        self.assertIn("上传 1 路", host.locator("#stage-connection-status").inner_text())
+        self.assertIn("均衡", host.locator("#stage-connection-status").inner_text())
         self.assertIn("广播服务器", first.locator("#topology-map").inner_text())
 
         host.locator("#sound-button").click()
@@ -295,6 +298,7 @@ class BroadcastFunctionalTests(unittest.TestCase):
             status=503, content_type="application/json", body='{"error":"SFU unavailable"}'))
         host.locator("#topology-mode").select_option("server")
         host.locator("#share-button").click()
+        host.wait_for_function("state.stageExpected")
         host.wait_for_function("state.broadcastClient?.status === 'failed'")
         self.assertIn("广播连接失败", host.locator("#stage-connection-status").inner_text())
         self.assertIn("服务器语音连接失败", host.locator("#voice-status").inner_text())
@@ -409,6 +413,78 @@ class BroadcastFunctionalTests(unittest.TestCase):
         guest.wait_for_function("!state.stageExpected")
         self.assertTrue(guest.locator("#broadcast-diagnostics").is_hidden())
         self.assert_voices([host, guest])
+        host.locator("#leave-button").click()
+
+    def test_lost_mode_response_and_delayed_join_recover_live_video(self):
+        host = self.page("Host", server_mode=True)
+        code = host.locator("#room-code-label").inner_text()
+        host.locator("#share-button").click()
+        original = functional.QuietHandler.room_response
+
+        def delayed(handler, room, participant):
+            if participant.client_id != room.host_id:
+                deadline = time.monotonic() + 3
+                while room.stage_version < 2 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+            return original(handler, room, participant)
+
+        with patch.object(functional.QuietHandler, "room_response", delayed):
+            guest = self.page("Guest", code)
+        self.assert_receiving(guest)
+
+        def lose_response(route):
+            route.fetch()
+            route.abort("failed")
+
+        host.route("**/transport", lose_response)
+        host.locator("#topology-mode").select_option("direct")
+        self.assert_receiving_p2p(guest)
+        host.wait_for_function("state.topologyMode === 'direct' && !elements.topologyMode.disabled")
+        host.unroute("**/transport")
+        host.locator("#topology-mode").select_option("server")
+        self.assert_receiving(guest)
+        guest.evaluate("state.stageExpected = false; state.topologyVersion = 0; showStage(false)")
+        guest.locator("#reconnect-button").click()
+        self.assert_receiving(guest)
+        host.locator("#leave-button").click()
+
+    def test_broadcast_profile_replaces_video_and_preserves_audio(self):
+        host = self.page("Host", server_mode=True)
+        self.assertEqual(host.evaluate("state.broadcastProfile"), "quality")
+        host.locator("#broadcast-profile").select_option("balanced")
+        guest = self.page("Guest", host.locator("#room-code-label").inner_text())
+        host.locator("#share-button").click()
+        self.assert_receiving(guest)
+        host.evaluate("window.keptMic = state.broadcastClient.microphoneTrack; window.keptSound = state.broadcastClient.tracks.find(t => t.kind === 'audio')")
+        host.locator("#broadcast-profile").select_option("smooth")
+        host.wait_for_function("state.broadcastClient.profile === 'smooth'")
+        self.assert_receiving(guest)
+        details = host.evaluate("""() => {
+          const track = state.broadcastClient.room.localParticipant.getTrackPublication('screen_share').track;
+          return {encodings: track.sender.getParameters().encodings, settings: track.mediaStreamTrack.getSettings(),
+            audioKept: window.keptSound === state.broadcastClient.tracks.find(t => t.kind === 'audio'),
+            micKept: window.keptMic === state.broadcastClient.microphoneTrack};
+        }""")
+        self.assertEqual(len(details["encodings"]), 1)
+        self.assertEqual(details["encodings"][0]["maxBitrate"], 2_000_000)
+        self.assertLessEqual(details["settings"]["height"], 720)
+        self.assertTrue(details["audioKept"])
+        self.assertTrue(details["micKept"])
+        host.locator("#broadcast-profile").select_option("balanced")
+        host.wait_for_function("state.broadcastClient.profile === 'balanced'")
+        self.assert_receiving(guest)
+        self.assert_voices([host, guest])
+        host.locator("#broadcast-profile").select_option("quality")
+        host.wait_for_function("state.broadcastClient.profile === 'quality'")
+        caps = host.evaluate("state.broadcastClient.room.localParticipant.getTrackPublication('screen_share').track.sender.getParameters().encodings.map(e => e.maxBitrate)")
+        self.assertEqual(caps, [5_000_000, 20_000_000])
+        self.assert_receiving(guest)
+        host.locator("#broadcast-bitrate").select_option("40")
+        host.wait_for_function("state.broadcastClient.maxMbps === 40")
+        caps = host.evaluate("state.broadcastClient.room.localParticipant.getTrackPublication('screen_share').track.sender.getParameters().encodings.map(e => e.maxBitrate)")
+        self.assertEqual(caps, [5_000_000, 40_000_000])
+        self.assertTrue(host.evaluate("window.keptSound === state.broadcastClient.tracks.find(t => t.kind === 'audio') && window.keptMic === state.broadcastClient.microphoneTrack"))
+        self.assert_receiving(guest)
         host.locator("#leave-button").click()
 
 
