@@ -486,6 +486,7 @@ class BroadcastFunctionalTests(unittest.TestCase):
         self.assert_voices([host, guest])
         host.locator("#broadcast-profile").select_option("quality")
         host.wait_for_function("state.broadcastClient.profile === 'quality'")
+        self.assertEqual(host.evaluate("state.broadcastClient.room.localParticipant.getTrackPublication('screen_share').track.sender.getParameters().degradationPreference"), "maintain-resolution")
         caps = host.evaluate("state.broadcastClient.room.localParticipant.getTrackPublication('screen_share').track.sender.getParameters().encodings.map(e => e.maxBitrate)")
         self.assertEqual(caps, [5_000_000, 20_000_000])
         self.assert_receiving(guest)
@@ -542,6 +543,108 @@ class BroadcastFunctionalTests(unittest.TestCase):
         host.locator("#share-button").click()
         guest.wait_for_function("!state.stageExpected && state.reliableClient === null")
         self.assert_voices([host, guest, late])
+        host.locator("#leave-button").click()
+
+    def test_reliable_header_only_encoder_recovers_and_failure_is_bounded(self):
+        host = self.page("Host", server_mode=True)
+        guest = self.page("Guest", host.locator("#room-code-label").inner_text())
+        host.evaluate("""() => {
+          window.keptVoiceRoom = state.broadcastClient.room;
+          window.headerOnlyEvents = 0;
+          const NativeRecorder = MediaRecorder;
+          window.MediaRecorder = class extends NativeRecorder {
+            constructor(stream, options) {
+              super(stream, options);
+              if (!options.mimeType.startsWith('video/mp4')) return;
+              // Reproduce a platform encoder emitting one blob, then no
+              // further media despite a live capture and recording state.
+              Object.defineProperty(this, 'ondataavailable', {set(callback) {
+                this.addEventListener('dataavailable', event => {
+                  if (!window.headerOnlyEvents++) callback(event);
+                });
+              }});
+            }
+          };
+        }""")
+        host.locator("#broadcast-delivery").select_option("reliable")
+        host.locator("#share-button").click()
+        host.wait_for_function("state.reliableClient?.encoderFallbacks === 1", timeout=20000)
+        guest.wait_for_function("state.reliableClient?.frames > 60 && !elements.stageVideo.paused", timeout=30000)
+        self.assertTrue(host.evaluate("state.reliableClient.mime.startsWith('video/webm;codecs=vp8')"))
+        self.assertTrue(host.evaluate("window.keptVoiceRoom === state.broadcastClient.room && state.display.active"))
+        self.assert_voices([host, guest])
+        host.evaluate("state.reliableClient.recorder.ondataavailable = null")
+        host.wait_for_function("state.reliableClient.status === 'failed'", timeout=20000)
+        self.assertEqual(host.evaluate("state.reliableClient.encoderFallbacks"), 1)
+        self.assertIn("连接失败", host.locator("#stage-connection-status").inner_text())
+        self.assertTrue(host.evaluate("state.display.active && window.keptVoiceRoom === state.broadcastClient.room"))
+        self.assert_voices([host, guest])
+        host.locator("#leave-button").click()
+
+    def assert_encoder_recovers(self, failure):
+        host = self.page("Host", server_mode=True)
+        guest = self.page("Guest", host.locator("#room-code-label").inner_text())
+        host.evaluate("""failure => {
+          window.keptVoiceRoom = state.broadcastClient.room;
+          const NativeRecorder = MediaRecorder;
+          window.MediaRecorder = class extends NativeRecorder {
+            constructor(stream, options) {
+              if (failure === 'constructor' && options.mimeType.startsWith('video/mp4')) {
+                throw new DOMException('Platform encoder unavailable', 'NotSupportedError');
+              }
+              super(stream, options);
+              if (failure === 'start' && options.mimeType.startsWith('video/mp4')) {
+                this.start = () => { throw new DOMException('Encoder startup failed', 'NotSupportedError'); };
+              }
+            }
+          };
+        }""", failure)
+        host.locator("#broadcast-delivery").select_option("reliable")
+        host.locator("#share-button").click()
+        if failure in ["error", "stop"]:
+            guest.wait_for_function("state.reliableClient?.frames > 30", timeout=30000)
+            guest.evaluate("window.beforeEncodingGeneration = state.reliableClient.generation")
+            if failure == "error":
+                host.evaluate("state.reliableClient.recorder.dispatchEvent(new Event('error'))")
+            else:
+                host.evaluate("state.reliableClient.recorder.stop()")
+        host.wait_for_function("state.reliableClient?.encoderFallbacks === 1 && state.reliableClient.mime?.startsWith('video/webm')", timeout=15000)
+        guest.wait_for_function("state.reliableClient?.generation && state.reliableClient.generation !== window.beforeEncodingGeneration && elements.stageVideo.videoWidth > 0 && !elements.stageVideo.paused", timeout=30000)
+        before = guest.evaluate("state.reliableClient.frames")
+        guest.wait_for_function("before => state.reliableClient.frames > before + 30", arg=before, timeout=30000)
+        self.assertTrue(host.evaluate("window.keptVoiceRoom === state.broadcastClient.room && state.display.active"))
+        self.assert_voices([host, guest])
+        host.locator("#leave-button").click()
+
+    def test_reliable_encoder_constructor_failure_recovers(self):
+        self.assert_encoder_recovers("constructor")
+
+    def test_reliable_encoder_start_failure_recovers(self):
+        self.assert_encoder_recovers("start")
+
+    def test_reliable_encoder_runtime_error_recovers(self):
+        self.assert_encoder_recovers("error")
+
+    def test_reliable_encoder_unexpected_stop_recovers(self):
+        self.assert_encoder_recovers("stop")
+
+    def test_reliable_decoder_error_reloads_keyframe_without_resetting_voice(self):
+        host = self.page("Host", server_mode=True)
+        guest = self.page("Guest", host.locator("#room-code-label").inner_text())
+        host.locator("#broadcast-delivery").select_option("reliable")
+        host.locator("#share-button").click()
+        guest.wait_for_function("state.reliableClient?.frames > 60", timeout=30000)
+        guest.evaluate("""() => {
+          window.keptVoiceRoom = state.broadcastClient.room;
+          window.failedMediaSource = state.reliableClient.mediaSource;
+          const buffer = state.reliableClient.buffer;
+          buffer.appendBuffer = () => { buffer.dispatchEvent(new Event('error')); };
+        }""")
+        guest.wait_for_function("state.reliableClient.mediaSource !== window.failedMediaSource && !elements.stageVideo.paused", timeout=20000)
+        before = guest.evaluate("state.reliableClient.frames")
+        guest.wait_for_function("before => state.reliableClient.frames > before + 30", arg=before, timeout=20000)
+        self.assertTrue(guest.evaluate("window.keptVoiceRoom === state.broadcastClient.room"))
+        self.assert_voices([host, guest])
         host.locator("#leave-button").click()
 
     def test_reliable_sixty_frame_timeline_does_not_seek_on_normal_chunks(self):

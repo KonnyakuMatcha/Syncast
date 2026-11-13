@@ -60,7 +60,8 @@
     if (sample.rttMs !== null) parts.push(`往返 ${Math.round(sample.rttMs)} ms`);
     const lines = [parts.join(" · ")];
     const streams = sample.streams.filter((s) => s.width && s.height && s.fps !== null);
-    if (streams.length) lines.push(streams.map((s) => `${s.width}×${s.height} / ${Math.round(s.fps)} 帧`).join(" + "));
+    if (streams.length) lines.push(`${sample.outbound ? "实际发送" : "实际接收"} `
+      + streams.map((s) => `${s.width}×${s.height} / ${Math.round(s.fps)} 帧`).join(" + "));
     if (sample.videoMbps !== null) lines.push(`画面 ${sample.videoMbps.toFixed(2)} Mbps`
       + (sample.audioMbps !== null ? ` · 共享声音 ${Math.round(sample.audioMbps * 1000)} kbps` : ""));
     const metrics = [];

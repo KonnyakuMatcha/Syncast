@@ -122,6 +122,10 @@ VPS 的标称带宽不代表房主到 VPS、VPS 到每位观众的实际吞吐�
 
 可靠高清使用房主统一的视频规格，观众个人画质选择器在此模式隐藏；切回 WebRTC 后恢复个人设置。新浏览器的可靠模式默认以 12 Mbps 为视频编码目标，可选择 20/30/40 Mbps；MediaRecorder 的码率是编码目标而非严格流量上限，音频、关键帧和封装也占带宽。静止画面不会为了凑码率而填充无用数据。切换传输方式、码率或源需要重新缓冲，麦克风通话保持。
 
+浏览器声明支持 H.264 并不保证当前设备的录制编码器可用。如果初始化、启动或录制过程中报错、意外停止，或连续 10 秒没有生成媒体片段，可靠高清会尝试一次 VP8/Opus 兼容编码，保留原视频目标和独立语音连接。兼容编码仍无输出时会明确报错，避免无限显示上传中；接收端也需要支持所选编码。
+
+WebRTC 的画质选项是目标值。高清档优先保持编码分辨率，资源不足时可能降低帧率；均衡档优先保持帧率。SFU 仍可因观众线路不足选择较低层，因此目标 1080p 不保证持续收到 1080p。观众直播状态显示播放器实际尺寸，「共享流统计」显示实际发送或接收分辨率、帧率和码率。
+
 可靠模式需要支持 MediaRecorder + MediaSource 的浏览器，推荐近期 Chrome/Edge；发送端根据本机浏览器支持情况选择格式，接收端仍需支持房主所选格式。不支持的客户端会显示提示，可让房主选择 WebRTC。服务器不转码，已排序媒体缓存每房间最多 16 MiB，另有最多 16 MiB 乱序上传窗口，观众中途加入从缓存关键帧开始，落后过多的观众会重新追到直播附近。断开后继续从已确认的字节位置下载，缓存过期时重取初始化与关键帧。上传数据只有当前房主可以发布，下载必须具有当前房间的有效会话。
 
 可靠广播使用现有 HTTP 代理路由，不需要新增公网端口或 WebSocket 路由。Nginx 等代理的请求体上限至少设为 `5m`，关闭代理缓冲和缓存：
@@ -408,6 +412,7 @@ node tests/media.test.js
 node tests/topology.test.js
 node tests/health.test.js
 node tests/broadcast-stats.test.js
+node tests/reliable-upload.test.js
 node --check static/app.js
 node --check static/broadcast.js
 docker compose --env-file .env -f compose.public.yaml config --quiet

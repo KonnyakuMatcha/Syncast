@@ -144,7 +144,7 @@ class SyncastBroadcast {
         await this.room.localParticipant.publishTrack(track, track.kind === "video" ? {
           source: sdk.Track.Source.ScreenShare,
           videoCodec: "vp8",
-          degradationPreference: "maintain-framerate",
+          degradationPreference: profile === "quality" ? "maintain-resolution" : "maintain-framerate",
           simulcast: profile !== "smooth",
           backupCodec: false,
           screenShareEncoding: profile === "smooth"
@@ -431,14 +431,17 @@ function serverBroadcastStatus() {
   if (state.stageReliable) {
     const reliable = state.reliableClient;
     if (reliable?.status === "failed") return "可靠广播连接失败";
+    if (reliable?.status === "encoding") return "可靠广播 · 编码启动中";
     return reliable?.status === "connected" ? (state.isHost ? "可靠广播 · 上传中" : "可靠广播 · 播放中") : "可靠广播 · 缓冲中";
   }
   const client = state.broadcastClient;
   if (["failed", "disconnected"].includes(client?.status)) return "广播连接失败 · 请重连";
   if (!client || client.status === "connecting") return "正在连接广播服务器";
   if (client.status !== "connected") return "广播重连中";
-  if (state.isHost) return client.source ? `服务器广播 · ${client.profile === "smooth" ? "流畅 720p30"
-    : client.profile === "balanced" ? "均衡 1080p60" : "高清 1080p60"}` : "正在发布画面";
+  if (state.isHost) return client.source ? `服务器广播 · ${client.profile === "smooth" ? "流畅 · 目标 720p30"
+    : client.profile === "balanced" ? "均衡 · 目标 1080p60" : "高清 · 目标 1080p60"}` : "正在发布画面";
   if (!state.stageStream?.getVideoTracks().length) return "等待广播画面";
-  return elements.stageVideo.paused ? "等待播放" : `服务器广播 · 播放中 · ${formatViewerQuality()}`;
+  const video = elements.stageVideo;
+  const actual = video.videoWidth && video.videoHeight ? `${video.videoWidth}×${video.videoHeight}` : "画质采样中";
+  return video.paused ? "等待播放" : `服务器广播 · 播放中 · ${actual}`;
 }

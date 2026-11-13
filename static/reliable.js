@@ -18,18 +18,21 @@ class ReliableBroadcast {
     this.lastTrim = 0;
     this.presented = 0;
     this.seekCount = 0;
+    this.compatibleCodec = false;
+    this.encoderFallbacks = 0;
   }
 
-  async publish(source, profile, maxMbps) {
-    if (this.source === source && this.profile === profile && this.maxMbps === maxMbps) return;
+  async publish(source, profile, maxMbps, restart = false) {
+    if (this.closed || (!restart && this.source === source && this.profile === profile && this.maxMbps === maxMbps)) return;
     this.serial++;
+    clearInterval(this.encoderTimer);
     if (this.recorder?.state === "recording") this.recorder.stop();
     this.capture?.getTracks().forEach((track) => track.stop());
     this.source = source;
     this.profile = profile;
     this.maxMbps = maxMbps;
     if (!source?.active) return;
-    const types = [RELIABLE_H264, RELIABLE_MIME].map((type) => source.getAudioTracks().length
+    const types = (this.compatibleCodec ? [RELIABLE_MIME] : [RELIABLE_H264, RELIABLE_MIME]).map((type) => source.getAudioTracks().length
       ? type : type.replace(",mp4a.40.2", "").replace(",opus", ""));
     const mime = types.find((type) => window.MediaRecorder?.isTypeSupported(type) && window.MediaSource?.isTypeSupported(type));
     if (!mime) throw new Error("此浏览器不支持可靠广播，请使用 Chrome 或选择 WebRTC");
@@ -44,23 +47,63 @@ class ReliableBroadcast {
     const generation = crypto.randomUUID();
     this.nextSequence = 0;
     this.queue = [];
-    const recorder = new MediaRecorder(this.capture, { mimeType: mime,
-      videoBitsPerSecond: (smooth ? 2 : profile === "balanced" ? 6 : maxMbps) * 1_000_000,
-      audioBitsPerSecond: 192_000, videoKeyFrameIntervalDuration: 800 });
+    let recorder;
+    try {
+      recorder = new MediaRecorder(this.capture, { mimeType: mime,
+        videoBitsPerSecond: (smooth ? 2 : profile === "balanced" ? 6 : maxMbps) * 1_000_000,
+        audioBitsPerSecond: 192_000, videoKeyFrameIntervalDuration: 800 });
+    } catch (error) {
+      this.recoverEncoder(error, serial, mime);
+      return;
+    }
     this.recorder = recorder;
     this.mime = recorder.mimeType;
     recorder.ondataavailable = ({ data }) => {
       if (!data.size || this.closed || serial !== this.serial) return;
-      this.queue.push({ generation, data, serial });
+      this.lastEncodedAt = performance.now();
+      // timeslice is a hint: a platform encoder may emit a large blob after
+      // suspension or a slow keyframe. Keep every HTTP request within the
+      // relay's limit without dropping bytes from the encoded timeline.
+      for (let offset = 0; offset < data.size; offset += 3 * 1024 * 1024) {
+        this.queue.push({ generation, data: data.slice(offset, offset + 3 * 1024 * 1024, this.mime), serial });
+      }
       if (this.queue.reduce((size, item) => size + item.data.size, 0) > 12 * 1024 * 1024) {
         this.fail(new Error("广播上传落后，请降低视频目标或检查房主上行"));
         return;
       }
       this.upload();
     };
-    recorder.onerror = () => this.fail(new Error("可靠广播编码失败，请重新共享"));
-    recorder.start(200);
-    this.status = "connected";
+    recorder.onerror = () => this.recoverEncoder(new Error("可靠广播编码失败"), serial, mime);
+    recorder.onstop = () => this.recoverEncoder(new Error("可靠广播编码意外停止"), serial, mime);
+    this.lastEncodedAt = performance.now();
+    this.status = "encoding";
+    try {
+      recorder.start(200);
+    } catch (error) {
+      this.recoverEncoder(error, serial, mime);
+      return;
+    }
+    // Capability checks do not guarantee a working platform encoder. Some
+    // browsers emit an initialization blob and then silently stop producing
+    // media while screen preview and voice continue normally.
+    this.encoderTimer = setInterval(() => {
+      if (performance.now() - this.lastEncodedAt >= 10000) {
+        this.recoverEncoder(new Error("广播编码器连续 10 秒未输出媒体"), serial, mime);
+      }
+    }, 1000);
+  }
+
+  recoverEncoder(error, serial, mime) {
+    if (this.closed || this.status === "failed" || serial !== this.serial) return;
+    if (!mime.startsWith("video/mp4") || this.compatibleCodec) {
+      this.fail(new Error(`${error.message}，请重新共享或选择 WebRTC`));
+      return;
+    }
+    this.compatibleCodec = true;
+    this.encoderFallbacks++;
+    console.warn("Reliable broadcast H.264 encoder failed; retrying VP8", error);
+    showToast("当前浏览器 H.264 编码未正常输出，正在切换兼容编码");
+    this.publish(this.source, this.profile, this.maxMbps, true).catch((failure) => this.fail(failure));
   }
 
   upload() {
@@ -88,6 +131,7 @@ class ReliableBroadcast {
             });
             if (!response.ok) throw new Error((await response.json()).error || "广播上传失败");
             this.bytes += item.data.size;
+            if (!this.closed && item.serial === this.serial) this.status = "connected";
             return;
           } catch (error) {
             if (this.closed || item.serial !== this.serial) return;
@@ -104,12 +148,13 @@ class ReliableBroadcast {
       return;
     }
     while (!this.closed) {
+      let reader;
       try {
         const response = await fetch(appPath(`/api/rooms/${state.roomCode}/relay?stream=1&clientId=${encodeURIComponent(state.clientId)}&generation=${encodeURIComponent(this.generation || "")}&cursor=${this.cursor || 0}`), {
           signal: this.controller.signal, headers: { Authorization: `Bearer ${state.sessionToken}` },
         });
         if (!response.ok) throw new Error("广播接收失败");
-        const reader = response.body.getReader();
+        reader = response.body.getReader();
         let buffer = new Uint8Array();
         while (!this.closed) {
           const { value, done } = await reader.read();
@@ -127,7 +172,15 @@ class ReliableBroadcast {
             buffer = buffer.slice(4 + length + metadata.bytes);
             if (!metadata.bytes) continue;
             if (metadata.reset) await this.resetPlayer(metadata.mime);
-            await this.append(payload);
+            try {
+              await this.append(payload);
+            } catch (error) {
+              // Retrying the same bytes against an errored SourceBuffer never
+              // repairs its decoder. Fetch a fresh initialization/keyframe.
+              this.generation = "";
+              this.cursor = 0;
+              throw error;
+            }
             this.generation = metadata.generation;
             this.cursor = metadata.cursor;
             this.bytes += metadata.bytes;
@@ -138,6 +191,8 @@ class ReliableBroadcast {
         if (this.closed) return;
         console.warn("Reliable broadcast receive retry", error);
         this.status = "reconnecting";
+      } finally {
+        await reader?.cancel().catch(() => {});
       }
       if (!this.closed) await new Promise((resolve) => setTimeout(resolve, 400));
     }
@@ -225,6 +280,7 @@ class ReliableBroadcast {
     if (this.closed) return;
     if (this.status === "failed") return;
     this.status = "failed";
+    clearInterval(this.encoderTimer);
     this.controller.abort();
     showToast(error.message);
     console.warn("Reliable broadcast failed", error);
@@ -235,6 +291,7 @@ class ReliableBroadcast {
 
   close() {
     this.closed = true;
+    clearInterval(this.encoderTimer);
     this.controller.abort();
     if (this.recorder?.state === "recording") this.recorder.stop();
     this.capture?.getTracks().forEach((track) => track.stop());
